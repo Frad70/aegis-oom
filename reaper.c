@@ -124,30 +124,30 @@ static int kill_cgroup(const char *path) {
     return aeg_guard_kill(path, user_slice, &protection);
 }
 
+static const char *const default_protect =
+    "systemd,sshd,dbus-daemon,dbus-broker,pipewire,wireplumber,Xorg,gnome-shell,kwin_wayland,sway,weston";
+
+/* An empty AEG_OOM_PROTECT keeps the built-in list; a non-empty one replaces it. */
+static void apply_conf_kv(const char *key, const char *val) {
+    double v;
+    if (!strcmp(key, "AEG_OOM_PROTECT")) { if (val[0]) oom_parse_protect(val, &protection); }
+    else if (!strcmp(key, "AEG_REAPER_DRYRUN")) {
+        if (aeg_config_number(val, 0, 1, 1, &v)) dryrun = (int)v;
+        else { dryrun = 1; logline("aegis-reaper: invalid AEG_REAPER_DRYRUN, staying in dry run"); }
+    }
+}
+
 static void load_protection(void) {
-    oom_parse_protect("systemd,sshd,dbus-daemon,dbus-broker,pipewire,wireplumber,Xorg,"
-                      "gnome-shell,kwin_wayland,sway,weston", &protection);
-    int global_dry = 0, reaper_dry = 0;
+    oom_parse_protect(default_protect, &protection);
+    dryrun = 0;
     const char *conf = getenv("AEG_CONF");
     char buf[64*1024];
-    if (aeg_guard_read(conf ? conf : "/etc/aegis/aegis-oom.conf", buf, sizeof buf) >= 0) {
-        char *line = buf;
-        while (line && *line) {
-            char *next = strchr(line, '\n'); if (next) *next++ = 0;
-            char key[80], val[1024];
-            if (aeg_config_assignment(line, key, sizeof key, val, sizeof val)) {
-                if (!strcmp(key, "AEG_OOM_PROTECT")) oom_parse_protect(val, &protection);
-                else if (!strcmp(key, "AEG_DRYRUN")) global_dry = strcmp(val, "0") != 0;
-                else if (!strcmp(key, "AEG_REAPER_DRYRUN")) reaper_dry = strcmp(val, "0") != 0;
-            }
-            line = next;
-        }
-    }
+    if (aeg_guard_read(conf ? conf : "/etc/aegis/aegis-oom.conf", buf, sizeof buf) >= 0)
+        aeg_config_each(buf, apply_conf_kv);
     const char *override = getenv("AEG_REAPER_PROTECT");
-    if (override) oom_parse_protect(override, &protection);
+    if (override) apply_conf_kv("AEG_OOM_PROTECT", override);
     override = getenv("AEG_REAPER_DRYRUN");
-    if (override) reaper_dry = strcmp(override, "0") != 0;
-    dryrun = global_dry || reaper_dry;
+    if (override) apply_conf_kv("AEG_REAPER_DRYRUN", override);
 }
 
 /* external escalation: a cgroup path written to the target file is killed, then the file is removed */

@@ -16,13 +16,17 @@ test-oom-runtime: test_oom_runtime.c oom.c oom_policy.c oom_policy.h config_valu
 test-cgroup-guard: test_cgroup_guard.c oom_policy.c oom_policy.h cgroup_guard.h aeg_common.h
 	$(CC) $(CFLAGS) -o test-cgroup-guard test_cgroup_guard.c oom_policy.c
 
+test-reaper: test_reaper.c reaper.c oom_policy.c oom_policy.h config_value.h cgroup_guard.h aeg_common.h
+	$(CC) $(CFLAGS) -o test-reaper test_reaper.c oom_policy.c
+
 test-oom-policy: test_oom_policy.c oom_policy.c oom_policy.h
 	$(CC) $(CFLAGS) -o test-oom-policy test_oom_policy.c oom_policy.c
 
-test: all test-oom-policy test-oom-runtime test-cgroup-guard
+test: all test-oom-policy test-oom-runtime test-cgroup-guard test-reaper
 	./test-oom-policy
 	./test-oom-runtime
 	./test-cgroup-guard
+	./test-reaper
 
 install:
 	./install.sh
@@ -31,4 +35,4 @@ uninstall:
 	./uninstall.sh
 
 clean:
-	rm -f aegis-oom aegis-reaper test-oom-policy test-oom-runtime test-cgroup-guard
+	rm -f aegis-oom aegis-reaper test-oom-policy test-oom-runtime test-cgroup-guard test-reaper

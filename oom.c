@@ -535,9 +535,7 @@ static void act_kill(int vi, const oom_verdict *v, const mem_state *m) {
     report_kill(p, v, m, sig, by_cgroup);
 }
 
-static void apply_conf_line(const char *line) {
-    char key[80], val[1024];
-    if (!aeg_config_assignment(line, key, sizeof key, val, sizeof val)) return;
+static void apply_conf_kv(const char *key, const char *val) {
     if (!strcmp(key, "AEG_OOM_PROTECT")) {
         if (!g_cli_protect) oom_parse_protect(val, &g_pl);
         return;
@@ -572,11 +570,8 @@ static void apply_conf_line(const char *line) {
     for (size_t i = 0; i < sizeof map / sizeof map[0]; i++) {
         if (strcmp(key, map[i].key)) continue;
         if (!strcmp(key, "AEG_OOM_DRYRUN") && g_cli_dryrun) return;
-        char *end = NULL;
-        errno = 0;
-        double value = strtod(val, &end);
-        if (errno || end == val || *end || !isfinite(value) || value < map[i].min || value > map[i].max ||
-            (map[i].type != 'd' && value != (long)value)) {
+        double value;
+        if (!aeg_config_number(val, map[i].min, map[i].max, map[i].type != 'd', &value)) {
             logline("aegis-oom: invalid numeric config value ignored");
             return;
         }
@@ -589,16 +584,14 @@ static void apply_conf_line(const char *line) {
     }
 }
 
+static void apply_conf_line(const char *line) {
+    char key[80], val[1024];
+    if (aeg_config_assignment(line, key, sizeof key, val, sizeof val)) apply_conf_kv(key, val);
+}
+
 static void load_conf(const char *path) {
     if (read_file(path, g_rbuf, sizeof g_rbuf) < 0) return;
-    char *p = g_rbuf;
-    while (p && *p) {
-        char *nl = strchr(p, '\n');
-        if (nl) *nl = 0;
-        while (*p == ' ' || *p == '\t') p++;
-        if (*p && *p != '#') apply_conf_line(p);
-        p = nl ? nl + 1 : 0;
-    }
+    aeg_config_each(g_rbuf, apply_conf_kv);
 }
 
 static int run_once(void) {

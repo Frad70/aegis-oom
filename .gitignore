@@ -5,3 +5,4 @@
 /test-cgroup-guard
 *.o
 __pycache__/
+/test-reaper
