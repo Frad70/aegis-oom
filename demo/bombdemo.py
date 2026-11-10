@@ -2,8 +2,11 @@
 """aegis-oom demo: a cgroup with a RAM limit and a memory bomb, killed by the real daemon.
 
 The daemon watches the pressure of this test cgroup only (AEG_OOM_PSI_PATH points at its
-memory.pressure) and picks victims only inside it (--scope). If the daemon misses the bomb,
-the kernel cgroup OOM fires at the hard limit; the host is not affected.
+memory.pressure) and picks victims only inside it (--scope). Scarcity is judged from the
+host's MemAvailable, which a small cgroup limit does not lower, so the demo sets the soft
+threshold to 1 TiB: scarcity is always assumed and the cgroup PSI decides the escalation.
+If the daemon misses the bomb, the kernel cgroup OOM fires at the hard limit; the host is
+not affected.
 
 Usage:   sudo python3 demo/bombdemo.py [--mem-max 4G] [--mem-high 3G]
                                        [--psi-soft 10] [--psi-hard 25] [--seconds 25]
@@ -81,7 +84,8 @@ def main():
         env = {**os.environ,
                "AEG_OOM_PSI_SOFT": a.psi_soft, "AEG_OOM_PSI_HARD": a.psi_hard,
                "AEG_OOM_RATE_MS": "400", "AEG_OOM_REFRESH_MS": "500",
-               "AEG_OOM_PSI_PATH": CG + "/memory.pressure"}
+               "AEG_OOM_PSI_PATH": CG + "/memory.pressure",
+               "AEG_OOM_AVAIL_SOFT_MB": "1048576"}
         dlog = open(LOG, "w")
         daemon = subprocess.Popen(
             [BIN, "--live", "--no-arm", "--no-conf", "--no-learn",
