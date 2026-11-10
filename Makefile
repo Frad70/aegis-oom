@@ -1,5 +1,6 @@
 CC ?= cc
 CFLAGS ?= -O2 -Wall -Wextra -std=c11
+PREFIX ?= /usr/local
 
 .PHONY: all test install uninstall clean
 all: aegis-oom aegis-reaper
@@ -30,10 +31,10 @@ test: all test-oom-policy test-oom-runtime test-cgroup-guard test-reaper
 	@echo "SKIP: root integration tests are not part of make test; run sudo tests/run.sh --tier fast"
 
 install:
-	./install.sh
+	PREFIX="$(PREFIX)" ./install.sh
 
 uninstall:
-	./uninstall.sh
+	PREFIX="$(PREFIX)" ./uninstall.sh
 
 clean:
 	rm -f aegis-oom aegis-reaper test-oom-policy test-oom-runtime test-cgroup-guard test-reaper
