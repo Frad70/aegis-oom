@@ -298,7 +298,38 @@ static void test_parse_zram(void) {
     CHECK(oom_parse_zram_mmstat("1 2\n", &o, &c, &t) == -1, "zram: too few fields -> -1");
 }
 
+static void test_ties_and_limits(void) {
+    thresholds t = base_th(); t.protect_smart = 0;
+    protect_list pl; oom_parse_protect("", &pl);
+    proc_sample same[3] = {
+        {.pid=500,.rss_kb=500000,.comm="java"},
+        {.pid=501,.rss_kb=500000,.comm="firefox"},
+        {.pid=502,.rss_kb=500000,.comm="steamwebhelper"},
+    };
+    CHECK(oom_pick_victim(same, 3, &pl, &t) == 0, "ties: equal scores keep the first candidate");
+    oom_parse_protect("java,firefox,steamwebhelper", &pl);
+    CHECK(oom_pick_victim(same, 3, &pl, &t) == -1, "ties: all protected gives no victim");
+    CHECK(oom_pick_victim(same, 0, &pl, &t) == -1, "ties: an empty list gives no victim");
+
+    char csv[64 * 8] = "";
+    for (int i = 0; i < OOM_MAX_PROTECT + 5; i++) {
+        char name[8]; snprintf(name, sizeof name, "p%d,", i); strcat(csv, name);
+    }
+    CHECK(oom_parse_protect(csv, &pl) == OOM_MAX_PROTECT, "protect: the list stops at its capacity");
+    CHECK(oom_is_protected("p0", &pl) && !oom_is_protected("p40", &pl), "protect: first names kept, extra dropped");
+    char longname[64]; memset(longname, 'x', sizeof longname - 1); longname[63] = 0;
+    oom_parse_protect(longname, &pl);
+    CHECK(strlen(pl.names[0]) == OOM_COMM_MAX - 1, "protect: a long name is cut to the comm buffer");
+
+    proc_sample init = {.pid=1,.rss_kb=9000000,.comm="systemd"};
+    proc_sample zero = {.pid=0,.rss_kb=9000000,.comm="swapper"};
+    oom_parse_protect("", &pl);
+    CHECK(oom_victim_score(&init, &pl, &t) < 0 && oom_victim_score(&zero, &pl, &t) < 0,
+          "guards: PID 1 and PID 0 never score, even with smart protection off");
+}
+
 int main(void) {
+    test_ties_and_limits();
     test_parse_protect();
     test_is_protected();
     test_victim_score();

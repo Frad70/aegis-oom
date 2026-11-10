@@ -93,22 +93,15 @@ else
   done
 fi
 
-# runtime guards / cleanup
-NEED_CGROUPS=0
-for i in "${SEL[@]}"; do
-  case "${T_CAT[$i]}" in forkbomb|oom) NEED_CGROUPS=1 ;; esac
-done
-if [ "$NEED_CGROUPS" = 1 ]; then
-  if [ "$(stat -fc %T "$CGROOT" 2>/dev/null)" != cgroup2fs ]; then
-    echo "SKIP: root integration tests (no cgroup v2 at $CGROOT)"; rm -rf "$STATE_DIR"; exit 0
-  fi
-  if [ "$PRIV_NEED" = 1 ] && ! sudo -n true 2>/dev/null; then
-    echo "SKIP: root integration tests (need root or passwordless sudo)"; rm -rf "$STATE_DIR"; exit 0
-  fi
+# runtime guards and cleanup: every case here needs cgroup v2 and privileges
+if [ "$(stat -fc %T "$CGROOT" 2>/dev/null)" != cgroup2fs ]; then
+  echo "SKIP: root integration tests (no cgroup v2 at $CGROOT)"; rm -rf "$STATE_DIR"; exit 0
 fi
-cleanup_selected() { [ "$NEED_CGROUPS" = 0 ] || reap_all_quiet; }
-trap 'rc=$?; cleanup_selected; rm -rf "$STATE_DIR"; exit $rc' EXIT
-cleanup_selected
+if [ "$PRIV_NEED" = 1 ] && ! sudo -n true 2>/dev/null; then
+  echo "SKIP: root integration tests (need root or passwordless sudo)"; rm -rf "$STATE_DIR"; exit 0
+fi
+trap 'rc=$?; reap_all_quiet; rm -rf "$STATE_DIR"; exit $rc' EXIT
+reap_all_quiet
 prepare_binaries || { echo "core build failed" >&2; exit 1; }
 
 # run
@@ -123,7 +116,7 @@ for i in "${SEL[@]}"; do
     "$n" "${#SEL[@]}" "${T_ID[$i]}" "${T_TIER[$i]}" "${T_CAT[$i]}" "${T_DESC[$i]}"
   rc=0
   eval "${T_RUN[$i]}" || rc=$?
-  cleanup_selected      # only cgroup tests touch their own cgroup roots
+  reap_all_quiet
   case "$rc" in
     0) PASS=$((PASS+1)); printf '   => PASS  %s\n' "${T_ID[$i]}" ;;
     2) SKIP=$((SKIP+1)); printf '   => SKIP  %s\n' "${T_ID[$i]}" ;;

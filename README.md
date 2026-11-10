@@ -40,7 +40,7 @@ make test       # offline unit tests
 
 ```sh
 sudo make install                    # PREFIX=/usr/local by default
-sudo PREFIX=/opt/aegis-oom ./install.sh
+sudo make install PREFIX=/opt/aegis-oom
 ```
 
 `install.sh` builds both binaries (the reaper statically when a static libc is
@@ -192,8 +192,9 @@ Environment only: `AEG_OOM_CONF` (config path), `AEG_OOM_PSI_PATH` (pressure
 file), `AEG_OOM_WATCH` (watch file), `AEG_CONF` and `AEG_REAPER_PROTECT` for
 the reaper.
 
-String values must not carry an inline comment: systemd `EnvironmentFile`
-keeps it as part of the value.
+A `#` outside quotes starts a comment, also after a value. systemd
+`EnvironmentFile` passes such comments on in the environment, and the daemons
+strip them with the same parser.
 
 Command line of `aegis-oom`: `--dry-run`, `--live`, `--protect LIST`,
 `--state PATH`, `--conf PATH`, `--no-conf`, `--no-learn`, `--no-arm`,
