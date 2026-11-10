@@ -51,7 +51,7 @@ static int          g_idle_ms = 6000;          /* idle cycle: meminfo+PSI only, 
 static int          g_idle_scan_s = 60;        /* how often to refresh the candidate snapshot while idle */
 static const char  *g_watch_path = "/run/aegis/watch";  /* a monitor touches this file to keep the hot cycle */
 static long         g_rate_ms = 2000;
-static double       g_baseline_alpha = 0.02;   /* ~5 minutes of memory at a 1.5 s cycle */
+static double       g_baseline_alpha = 0.02;   /* time constant about 75 s at a 1.5 s cycle */
 static int          g_cgroup_kill = 0;         /* kill the whole leaf cgroup instead of one PID */
 static int          g_cli_protect, g_cli_dryrun, g_cli_state;
 static int          g_no_conf;
