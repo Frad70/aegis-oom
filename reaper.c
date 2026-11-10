@@ -13,6 +13,7 @@
 #define _GNU_SOURCE
 #include "cgroup_guard.h"
 #include "config_value.h"
+#include "aeg_common.h"
 #include <signal.h>
 #include <stdint.h>
 #include <stdarg.h>
@@ -43,15 +44,6 @@ static char best_path[PATHMAX];
 static long best_pids;
 static protect_list protection;
 static int dryrun;
-static volatile sig_atomic_t reload_config;
-static void on_hup(int sig) { (void)sig; reload_config = 1; }
-
-struct ld64 { /* linux_dirent64 */
-    uint64_t d_ino, d_off;
-    uint16_t d_reclen;
-    uint8_t  d_type;
-    char     d_name[];
-};
 
 /* libc snprintf/vsnprintf do not allocate heap memory: safe on the hot path */
 static int snprintf_safe(char *d, size_t n, const char *f, ...) {
@@ -62,8 +54,6 @@ static int snprintf_safe(char *d, size_t n, const char *f, ...) {
     if ((size_t)r >= n) r = n ? (int)n - 1 : 0;
     return r;
 }
-
-static void logline(const char *s) { write(2, s, strlen(s)); write(2, "\n", 1); }
 
 static void logkv(const char *msg, const char *path, long n) {
     char b[PATHMAX + 128]; int i = 0;
@@ -160,16 +150,6 @@ static void load_protection(void) {
     dryrun = global_dry || reaper_dry;
 }
 
-/* arm: unkillable + resident + prioritized */
-static void arm(void) {
-    int fd = open("/proc/self/oom_score_adj", O_WRONLY | O_CLOEXEC);
-    if (fd < 0 || write(fd, "-1000", 5) != 5) logline("reaper: oom_score_adj failed");
-    if (fd >= 0) close(fd);
-    if (mlockall(MCL_CURRENT | MCL_FUTURE)) logline("reaper: mlockall failed");
-    struct sched_param sp; sp.sched_priority = 40;
-    if (sched_setscheduler(0, SCHED_FIFO, &sp)) logline("reaper: SCHED_FIFO failed");
-}
-
 /* external escalation: a cgroup path written to the target file is killed, then the file is removed */
 static void check_target_file(void) {
     int fd = open(target_file, O_RDONLY | O_CLOEXEC);
@@ -191,14 +171,14 @@ int main(int argc, char **argv) {
     if (argc > 3) leaf_min = atol(argv[3]);
     if (threshold < 1 || leaf_min < 1 || user_slice[0] != '/') return 2;
     load_protection();
-    signal(SIGHUP, on_hup);
-    arm();
+    setup_signals();
+    arm("aegis-reaper");
     logkv("aegis-reaper armed (mlock+RT+oom-1000), threshold on", user_slice, threshold);
 
     struct timespec ts;
     char path[PATHMAX];
-    for (;;) {
-        if (reload_config) { reload_config = 0; load_protection(); }
+    while (!g_stop) {
+        if (g_reload) { g_reload = 0; load_protection(); }
         check_target_file();
         long total = read_long_at(user_slice, "pids.current");
         if (total >= threshold) {

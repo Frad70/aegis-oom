@@ -2,6 +2,7 @@
 #define AEG_CGROUP_GUARD_H
 /* Shared by aegis-oom and aegis-reaper. No fork, heap allocation or shell commands. */
 #include "oom_policy.h"
+#include "aeg_common.h"
 #include <errno.h>
 #include <limits.h>
 #include <fcntl.h>
@@ -74,7 +75,6 @@ static inline int aeg_guard_members(int dirfd, const protect_list *pl) {
 }
 
 static inline int aeg_guard_leaf(int dirfd) {
-    struct guard_dirent { uint64_t ino, off; uint16_t len; uint8_t type; char name[]; };
     int scanfd = openat(dirfd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (scanfd < 0) return 0;
     char buf[4096];
@@ -85,12 +85,12 @@ static inline int aeg_guard_leaf(int dirfd) {
         if (n < 0) { leaf = 0; break; }
         if (!n) break;
         for (long off = 0; off < n;) {
-            struct guard_dirent *e = (void *)(buf + off);
-            if (!e->len || off + e->len > n) { leaf = 0; break; }
-            off += e->len;
-            if (!strcmp(e->name, ".") || !strcmp(e->name, "..")) continue;
+            struct ld64 *e = (void *)(buf + off);
+            if (!e->d_reclen || off + e->d_reclen > n) { leaf = 0; break; }
+            off += e->d_reclen;
+            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
             struct stat st;
-            if (fstatat(scanfd, e->name, &st, AT_SYMLINK_NOFOLLOW) != 0 || S_ISLNK(st.st_mode) || S_ISDIR(st.st_mode)) {
+            if (fstatat(scanfd, e->d_name, &st, AT_SYMLINK_NOFOLLOW) != 0 || S_ISLNK(st.st_mode) || S_ISDIR(st.st_mode)) {
                 leaf = 0; break;
             }
         }

@@ -7,6 +7,7 @@
 #include "oom_policy.h"
 #include "config_value.h"
 #include "cgroup_guard.h"
+#include "aeg_common.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -75,12 +76,6 @@ static long   g_hz = 100;
 static int    g_self_pid = 0;
 static const char *g_learn_path = "/var/lib/aegis/learned";
 
-struct ld64 { uint64_t d_ino, d_off; uint16_t d_reclen; uint8_t d_type; char d_name[]; };
-
-static volatile sig_atomic_t g_stop = 0;
-static volatile sig_atomic_t g_reload = 0;
-static void on_term(int s) { (void)s; g_stop = 1; }
-static void on_hup(int s)  { (void)s; g_reload = 1; }
 
 static int numeric_tail(const char *tail) {
     while (*tail == ' ' || *tail == '\t') tail++;
@@ -120,34 +115,10 @@ static void validate_runtime_settings(void) {
     if (g_psi_stall_us < 1 || g_psi_stall_us >= g_psi_window_us) g_psi_stall_us = g_psi_window_us / 2;
 }
 
-static void logline(const char *s) { write(2, s, strlen(s)); write(2, "\n", 1); }
 
 static long now_ms(void) {
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
     return ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
-}
-
-static int read_file(const char *path, char *buf, size_t n) {
-    int fd = open(path, O_RDONLY | O_CLOEXEC);
-    if (fd < 0) return -1;
-    ssize_t k = read(fd, buf, n - 1);
-    close(fd);
-    if (k < 0) return -1;
-    buf[k] = 0; return (int)k;
-}
-
-/* Hardening reports each failure: a killer that is swapped out or starved of
- * CPU must not be counted as ready. */
-static void arm(void) {
-    int fd = open("/proc/self/oom_score_adj", O_WRONLY | O_CLOEXEC);
-    if (fd < 0 || write(fd, "-1000", 5) != 5)
-        logline("aegis-oom: hardening failed, oom_score_adj not set; the kernel may kill the killer");
-    if (fd >= 0) close(fd);
-    if (mlockall(MCL_CURRENT | MCL_FUTURE) != 0)
-        logline("aegis-oom: hardening failed, mlockall refused; under pressure the killer may be swapped out");
-    struct sched_param sp; sp.sched_priority = 40;
-    if (sched_setscheduler(0, SCHED_FIFO, &sp) != 0)
-        logline("aegis-oom: hardening failed, SCHED_FIFO not set; under CPU saturation the killer may not get time");
 }
 
 static void read_mem_state(mem_state *m) {
@@ -758,10 +729,6 @@ static int parse_args(int argc, char **argv, int *once) {
     return 0;
 }
 
-static void setup_signals(void) {
-    signal(SIGTERM, on_term); signal(SIGINT, on_term); signal(SIGHUP, on_hup);
-}
-
 /* PSI trigger on the root cgroup memory.pressure. Without it the loop polls on a timeout.
  * Returns the epoll fd, or -1; *pfd is the PSI fd or -1. */
 static int open_wakeup(int *pfd, int *have_trigger) {
@@ -872,7 +839,7 @@ int main(int argc, char **argv) {
     if (!once) ensure_rundir();
     learn_load();
     setup_signals();
-    if (g_arm) arm();
+    if (g_arm) arm("aegis-oom");
 
     if (once) return run_once();
 

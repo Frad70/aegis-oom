@@ -4,16 +4,16 @@ CFLAGS ?= -O2 -Wall -Wextra -std=c11
 .PHONY: all test install uninstall clean
 all: aegis-oom aegis-reaper
 
-aegis-oom: oom.c oom_policy.c oom_policy.h config_value.h cgroup_guard.h
+aegis-oom: oom.c oom_policy.c oom_policy.h config_value.h cgroup_guard.h aeg_common.h
 	$(CC) $(CFLAGS) -o aegis-oom oom.c oom_policy.c
 
-aegis-reaper: reaper.c oom_policy.c oom_policy.h config_value.h cgroup_guard.h
+aegis-reaper: reaper.c oom_policy.c oom_policy.h config_value.h cgroup_guard.h aeg_common.h
 	$(CC) $(CFLAGS) -o aegis-reaper reaper.c oom_policy.c
 
-test-oom-runtime: test_oom_runtime.c oom.c oom_policy.c oom_policy.h config_value.h cgroup_guard.h
+test-oom-runtime: test_oom_runtime.c oom.c oom_policy.c oom_policy.h config_value.h cgroup_guard.h aeg_common.h
 	$(CC) $(CFLAGS) -o test-oom-runtime test_oom_runtime.c oom_policy.c
 
-test-cgroup-guard: test_cgroup_guard.c oom_policy.c oom_policy.h cgroup_guard.h
+test-cgroup-guard: test_cgroup_guard.c oom_policy.c oom_policy.h cgroup_guard.h aeg_common.h
 	$(CC) $(CFLAGS) -o test-cgroup-guard test_cgroup_guard.c oom_policy.c
 
 test-oom-policy: test_oom_policy.c oom_policy.c oom_policy.h
