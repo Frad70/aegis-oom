@@ -1,0 +1,7 @@
+/aegis-oom
+/aegis-reaper
+/test-oom-policy
+/test-oom-runtime
+/test-cgroup-guard
+*.o
+__pycache__/

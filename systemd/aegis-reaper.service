@@ -1,0 +1,29 @@
+[Unit]
+Description=aegis-reaper pre-armed fork bomb killer
+Documentation=file:@PREFIX@/share/doc/aegis-oom/README.md
+DefaultDependencies=no
+After=sysinit.target
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=simple
+Environment=AEG_CONF=/etc/aegis/aegis-oom.conf
+ExecReload=/bin/kill -HUP $MAINPID
+# arguments: task threshold for the watched cgroup, the watched cgroup, smallest leaf it may kill
+ExecStart=@PREFIX@/bin/aegis-reaper 8000 /sys/fs/cgroup/user.slice 300
+Restart=always
+RestartSec=2
+# the binary applies the same hardening; this covers a failed attempt
+CPUSchedulingPolicy=fifo
+CPUSchedulingPriority=40
+LimitMEMLOCK=infinity
+LimitRTPRIO=99
+OOMScoreAdjust=-1000
+# the reaper must survive memory shortage: no swap and no OOM kill
+MemorySwapMax=0
+# a bomb must not exhaust the task limit of the reaper's own cgroup
+TasksMax=infinity
+
+[Install]
+WantedBy=multi-user.target

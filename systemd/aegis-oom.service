@@ -1,0 +1,27 @@
+[Unit]
+Description=aegis-oom pre-armed userspace OOM killer
+Documentation=file:@PREFIX@/share/doc/aegis-oom/README.md
+DefaultDependencies=no
+After=sysinit.target
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/aegis/aegis-oom.conf
+ExecStart=@PREFIX@/bin/aegis-oom
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=2
+# the binary applies the same hardening; this covers a failed attempt
+CPUSchedulingPolicy=fifo
+CPUSchedulingPriority=40
+LimitMEMLOCK=infinity
+LimitRTPRIO=99
+OOMScoreAdjust=-1000
+# the killer must survive memory shortage: no swap and no OOM kill
+MemorySwapMax=0
+TasksMax=infinity
+
+[Install]
+WantedBy=multi-user.target
