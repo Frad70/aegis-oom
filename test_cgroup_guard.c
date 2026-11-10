@@ -41,7 +41,7 @@ int main(void) {
     pid_t child = fork();
     if (child == 0) {
         close(pipes[1]); prctl(PR_SET_NAME, "guard-worker", 0, 0, 0);
-        char c; (void)read(pipes[0], &c, 1); _exit(0);
+        char c; _exit(read(pipes[0], &c, 1) < 0);
     }
     CHECK(child > 0, "child fixture"); close(pipes[0]);
     if (child > 0) {

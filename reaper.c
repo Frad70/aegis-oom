@@ -28,6 +28,8 @@
 #include <sys/syscall.h>
 #include <sys/stat.h>
 #include <dirent.h>
+#include <linux/magic.h>
+#include <sys/statfs.h>
 
 #define USER_SLICE "/sys/fs/cgroup/user.slice"
 #define PATHMAX    1024
@@ -162,7 +164,26 @@ static void check_target_file(void) {
         buf[k] = 0;
         if (k > 0 && kill_cgroup(buf) == 0) logkv("reaper: killed escalated cgroup", buf, 0);
     }
+    /* a missing file is the normal case; any other failure is retried on the next poll */
     unlink(target_file);
+}
+
+/* Without cgroup v2 and its pids controller the threshold is never seen.
+ * Refuse to start instead of idling. The watched cgroup itself may appear
+ * later (user.slice is created at the first login), so it is only reported. */
+static int check_support(void) {
+    struct statfs fs;
+    char b[PATHMAX + 160];
+    if (statfs("/sys/fs/cgroup", &fs) != 0 || fs.f_type != CGROUP2_SUPER_MAGIC ||
+        read_file("/sys/fs/cgroup/cgroup.controllers", b, sizeof b) < 0 || !strstr(b, "pids")) {
+        logline("aegis-reaper: cgroup v2 with the pids controller is required at /sys/fs/cgroup");
+        return 0;
+    }
+    if (read_long_at(user_slice, "pids.current") < 0) {
+        snprintf(b, sizeof b, "aegis-reaper: %s/pids.current is not readable yet; waiting for it", user_slice);
+        logline(b);
+    }
+    return 1;
 }
 
 int main(int argc, char **argv) {
@@ -173,6 +194,7 @@ int main(int argc, char **argv) {
         return 2;
     }
     if (argc > 2) user_slice = argv[2];
+    if (!check_support()) return 1;
     aeg_guard_init();
     load_protection();
     setup_signals();

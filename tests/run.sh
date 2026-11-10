@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # tests/run.sh: tiered root integration tests for aegis-reaper and aegis-oom.
 #
-#   ./tests/run.sh --tier fast            # ~quick checks, run on every PR in CI
-#   ./tests/run.sh --tier full            # fast + the full matrix, for master updates
+#   ./tests/run.sh --tier fast            # two smoke cases
+#   ./tests/run.sh --tier full            # fast plus the full matrix
 #   ./tests/run.sh --list                 # list all cases with their tier + counts
 #   ./tests/run.sh --only id1,id2,...     # run exactly these case ids (any tier)
 #
 # SAFETY: fork-bomb / reaper cases use a dedicated test cgroup root
 # (/sys/fs/cgroup/aegis-citest-<run-id>) and a dedicated test reaper instance pointed at
-# it; the live system reaper (which watches user.slice) is never touched. See
-# tests/README.md. Privileged cgroup ops use sudo when not run as root.
+# it; the live system reaper (which watches user.slice) is never touched.
+# Privileged cgroup operations use sudo when not run as root. Without root,
+# passwordless sudo or cgroup v2 the run prints SKIP and exits 0.
 #
 # Exit code: nonzero if any selected case fails. Skips do not fail.
 set -uo pipefail
@@ -98,9 +99,11 @@ for i in "${SEL[@]}"; do
   case "${T_CAT[$i]}" in forkbomb|oom) NEED_CGROUPS=1 ;; esac
 done
 if [ "$NEED_CGROUPS" = 1 ]; then
-  [ "$(stat -fc %T "$CGROOT" 2>/dev/null)" = cgroup2fs ] || { echo "need cgroup v2 at $CGROOT" >&2; exit 2; }
+  if [ "$(stat -fc %T "$CGROOT" 2>/dev/null)" != cgroup2fs ]; then
+    echo "SKIP: root integration tests (no cgroup v2 at $CGROOT)"; rm -rf "$STATE_DIR"; exit 0
+  fi
   if [ "$PRIV_NEED" = 1 ] && ! sudo -n true 2>/dev/null; then
-    echo "need root or passwordless sudo for cgroup cases" >&2; exit 2
+    echo "SKIP: root integration tests (need root or passwordless sudo)"; rm -rf "$STATE_DIR"; exit 0
   fi
 fi
 cleanup_selected() { [ "$NEED_CGROUPS" = 0 ] || reap_all_quiet; }

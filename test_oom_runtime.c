@@ -94,7 +94,8 @@ static void soft_escalates_after_term_grace(void) {
     pid_t child = fork();
     if (!child) {
         close(pipes[0]); signal(SIGTERM, SIG_IGN);
-        (void)write(pipes[1], "r", 1); close(pipes[1]);
+        if (write(pipes[1], "r", 1) != 1) _exit(1);
+        close(pipes[1]);
         for (;;) pause();
     }
     close(pipes[1]); char ready;

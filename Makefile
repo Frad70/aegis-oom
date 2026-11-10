@@ -27,6 +27,7 @@ test: all test-oom-policy test-oom-runtime test-cgroup-guard test-reaper
 	./test-oom-runtime
 	./test-cgroup-guard
 	./test-reaper
+	@echo "SKIP: root integration tests are not part of make test; run sudo tests/run.sh --tier fast"
 
 install:
 	./install.sh

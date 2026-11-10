@@ -6,8 +6,7 @@
 #     $CITEST under /sys/fs/cgroup, never /sys/fs/cgroup/user.slice.
 #   * The reaper under test is a DEDICATED TEST INSTANCE pointed at $CITEST, so it
 #     can never be confused with (or kill on behalf of) the live system reaper,
-#     which watches user.slice. All test-reaper teardown is keyed to the $CITEST
-#     path, so a pkill can only ever match our instance.
+#     which watches user.slice. Teardown kills only the PID this run started.
 #   * Every bomb leaf gets a pids.max backstop; every cgroup write goes through one
 #     helper (sudo-redirect-safe); teardown cgroup.kill's the whole subtree and
 #     rmdir's it, on success AND on failure.
@@ -55,11 +54,13 @@ reap_tree() {
   if [ -d "$root" ]; then sleep 0.3; priv rmdir "$root" 2>/dev/null; fi
 }
 
+REAPER_PID=""
 reaper_stop() {
-  # keyed to the $CITEST path -> can match ONLY our test instance, never the
-  # live system reaper (which is `aegis-reaper 8000 .../user.slice 300`).
-  priv pkill -f "aegis-reaper .*${CITEST}" 2>/dev/null
-  sleep 0.2
+  # only the instance this run started; under sudo the signal is relayed to it
+  [ -n "$REAPER_PID" ] || return 0
+  priv kill "$REAPER_PID" 2>/dev/null
+  wait "$REAPER_PID" 2>/dev/null
+  REAPER_PID=""
 }
 
 # belt-and-suspenders cleanup run between every case and on EXIT
@@ -95,6 +96,7 @@ cg_ensure_citest() {
 reaper_start() {   # <pids_threshold> <leaf_min>  (cgroup root is always $CITEST)
   : > "$REAPER_LOG"
   priv "$REAPER_BIN" "$1" "$CITEST" "$2" >"$REAPER_LOG" 2>&1 &
+  REAPER_PID=$!
   sleep 0.4   # let it arm + complete first scan
 }
 

@@ -448,8 +448,7 @@ static void write_state(int n, const mem_state *m, const oom_verdict *v, int sca
     close(fd);
     /* Rename only a complete write: on tmpfs under memory shortage a write can
      * come up short, and the fragment would replace the last valid state. */
-    if (w == (ssize_t)len) rename(tmp, g_state_path);
-    else unlink(tmp);
+    if (w != (ssize_t)len || rename(tmp, g_state_path) != 0) unlink(tmp);
 }
 
 /* pidfd of the last signalled victim: the next one waits until it exits or the grace ends */
@@ -630,11 +629,15 @@ static int run_once(void) {
 }
 
 static void ensure_rundir(void) {
-    mkdir("/run/aegis", 0755);
+    if (mkdir("/run/aegis", 0755) != 0 && errno != EEXIST)
+        logline("aegis-oom: cannot create /run/aegis; the state file will not be written");
     /* the watch file is world writable: a monitor runs as a user and the
      * directory belongs to root */
     int fd = open(g_watch_path, O_WRONLY | O_CREAT, 0666);
-    if (fd >= 0) { fchmod(fd, 0666); close(fd); }
+    if (fd >= 0) {
+        if (fchmod(fd, 0666) != 0) logline("aegis-oom: cannot make the watch file writable for monitors");
+        close(fd);
+    }
 }
 
 /* The learned baseline survives a reboot: otherwise the killer spends five
@@ -654,12 +657,12 @@ static void learn_save(void) {
     char tmp[256], buf[256];
     snprintf(tmp, sizeof tmp, "%s.tmp", g_learn_path);
     int n = snprintf(buf, sizeof buf, "%.4f\n", g_baseline);
-    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
     if (fd < 0) return;
     ssize_t w = write(fd, buf, (size_t)n);
-    (void)w;
     close(fd);
-    rename(tmp, g_learn_path);
+    /* a lost save only costs relearning time; never replace the file with a fragment */
+    if (w != (ssize_t)n || rename(tmp, g_learn_path) != 0) unlink(tmp);
 }
 
 /* A monitor touches the watch file while it looks. A fresh mtime keeps the hot
@@ -827,8 +830,18 @@ static void run_loop(int ep) {
     }
 }
 
+/* Kills go only through pidfd (Linux 5.3 and later). Without it no kill is
+ * safe, so refuse to start instead of running as a silent no-op. */
+static int have_pidfd(void) {
+    int fd = (int)syscall(SYS_pidfd_open, getpid(), 0);
+    if (fd < 0) return 0;
+    close(fd);
+    return 1;
+}
+
 int main(int argc, char **argv) {
     aeg_guard_init();
+    if (!have_pidfd()) { logline("aegis-oom: pidfd_open is not supported by this kernel (Linux 5.3 or later is required)"); return 1; }
     g_hz = sysconf(_SC_CLK_TCK); if (g_hz <= 0) g_hz = 100;
 
     load_env();
