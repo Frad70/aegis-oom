@@ -81,7 +81,6 @@ static int g_pid_index[PREV_SLOTS];
 static double g_baseline = 0.0;
 static int    g_sustain = 0;
 static long   g_hz = 100;
-static int    g_self_pid = 0;
 static const char *g_learn_path = "/var/lib/aegis/learned";
 
 
@@ -223,7 +222,7 @@ static int read_proc(int pid, proc_sample *s) {
     char b[32]; s->oom_score_adj = 0;
     long adj;
     if (read_file(path, b, sizeof b) >= 0 && aeg_parse_long(b, -1000, 1000, &adj)) s->oom_score_adj = (int)adj;
-    if (pid == g_self_pid) s->flags |= PF_SELF;
+    if (aeg_is_guarded(pid)) s->flags |= PF_SELF;
 
     snprintf(path, sizeof path, "/proc/%d/stat", pid);
     int tty = 0;
@@ -829,7 +828,7 @@ static void run_loop(int ep) {
 }
 
 int main(int argc, char **argv) {
-    g_self_pid = (int)getpid();
+    aeg_guard_init();
     g_hz = sysconf(_SC_CLK_TCK); if (g_hz <= 0) g_hz = 100;
 
     load_env();

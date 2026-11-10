@@ -149,6 +149,24 @@ static void learned_baseline_is_checked(void) {
     g_learning = 0;
 }
 
+static void self_parent_and_session_guards(void) {
+    oom_parse_protect("", &g_pl);
+    g_th.protect_smart = 0;
+    EXPECT(aeg_pid_protected(1, &g_pl), "PID 1 is never a target");
+    EXPECT(!aeg_pid_protected((int)getpid(), &g_pl), "an ordinary process is not guarded before init");
+    aeg_guard_init();
+    int pids[3] = {(int)getpid(), (int)getppid(), (int)getsid(0)};
+    for (int i = 0; i < 3; i++) {
+        proc_sample s;
+        if (read_proc(pids[i], &s) != 0) continue;
+        s.rss_kb = 1 << 20;
+        EXPECT(s.flags & PF_SELF, "self, parent and session leader are flagged");
+        EXPECT(oom_victim_score(&s, &g_pl, &g_th) < 0, "a guarded process never scores");
+        EXPECT(aeg_pid_protected(pids[i], &g_pl), "a guarded process fails the final check");
+    }
+    memset(g_guard_pids, 0, sizeof g_guard_pids);
+}
+
 int main(void) {
     learned_baseline_is_checked();
     signal_choice();
@@ -159,6 +177,7 @@ int main(void) {
     invalid_environment_cannot_arm();
     complete_candidate_selection();
     soft_escalates_after_term_grace();
+    self_parent_and_session_guards();
     if (failures) return 1;
     puts("OK: oom runtime");
     return 0;

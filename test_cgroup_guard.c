@@ -23,6 +23,9 @@ int main(void) {
     int fd = aeg_guard_open(path, root, &pl);
     CHECK(fd >= 0, "valid complete membership accepted"); if (fd >= 0) close(fd);
     CHECK(aeg_guard_open(root, root, &pl) < 0, "root is never a victim");
+    aeg_guard_init();
+    CHECK(aeg_guard_open(path, root, &pl) < 0, "a leaf holding the daemon itself is refused");
+    memset(g_guard_pids, 0, sizeof g_guard_pids);
     char bad[1200]; snprintf(bad, sizeof bad, "%s/../%s/job.scope", root, strrchr(root, '/') + 1);
     CHECK(aeg_guard_open(bad, root, &pl) < 0, "parent traversal rejected");
     snprintf(bad, sizeof bad, "%s/alias", root); CHECK(!symlink(path, bad), "symlink fixture");

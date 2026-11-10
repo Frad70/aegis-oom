@@ -173,6 +173,7 @@ int main(int argc, char **argv) {
         return 2;
     }
     if (argc > 2) user_slice = argv[2];
+    aeg_guard_init();
     load_protection();
     setup_signals();
     arm("aegis-reaper");

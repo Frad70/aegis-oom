@@ -49,6 +49,20 @@ static inline int aeg_parse_long(const char *s, long min, long max, long *out) {
     return 1;
 }
 
+/* The daemon itself, its parent and its session leader are never acted on,
+ * whatever the config says. Filled once at start; zero entries match nothing. */
+static int g_guard_pids[3];
+static inline void aeg_guard_init(void) {
+    g_guard_pids[0] = (int)getpid();
+    g_guard_pids[1] = (int)getppid();
+    g_guard_pids[2] = (int)getsid(0);
+}
+static inline int aeg_is_guarded(int pid) {
+    if (pid <= 1) return 1;
+    for (int i = 0; i < 3; i++) if (g_guard_pids[i] > 0 && g_guard_pids[i] == pid) return 1;
+    return 0;
+}
+
 static volatile sig_atomic_t g_stop = 0;
 static volatile sig_atomic_t g_reload = 0;
 static void on_term(int s) { (void)s; g_stop = 1; }

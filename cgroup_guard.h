@@ -30,6 +30,7 @@ static inline int aeg_guard_read(const char *path, char *buf, size_t size) {
 static inline int aeg_pid_protected(int pid, const protect_list *pl) {
     for (int depth = 0; depth < 64; depth++) {   /* same bound as the scan in aegis-oom */
         if (pid <= 1) return depth == 0;
+        if (depth == 0 && aeg_is_guarded(pid)) return 1;
         char path[64], buf[8192];
         snprintf(path, sizeof path, "/proc/%d/status", pid);
         if (aeg_guard_read(path, buf, sizeof buf) < 0) return errno == ENOENT ? 0 : 1;
