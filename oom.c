@@ -451,26 +451,27 @@ static void write_state(int n, const mem_state *m, const oom_verdict *v, int sca
 /* pidfd of the last signalled victim: the next one waits until it exits or the grace ends */
 static int g_pending_pidfd = -1;
 
-static void act_kill(int vi, const oom_verdict *v, const mem_state *m) {
-    if (vi < 0) return;
-    proc_sample *p = &g_procs[vi];
-    if (p->pid <= 1 || !p->start_ticks) return;
-    long t = now_ms(), since = t - g_last_kill_ms;
+/* Rate limits and escalation. Returns SIGTERM, SIGKILL or 0 for "not now". */
+static int choose_signal(const proc_sample *p, const oom_verdict *v, long t) {
+    long since = t - g_last_kill_ms;
     int repeat = p->pid == g_last_kill_pid && p->start_ticks == g_last_kill_start;
-    if (g_last_kill_pid && since < g_rate_ms) return;
-    if (g_dryrun && g_last_dry_ms && t - g_last_dry_ms < g_rate_ms) return;
-    if (repeat && g_last_signal == SIGTERM && v->action != ACT_HARD && since < g_term_grace_ms) return;
+    if (g_last_kill_pid && since < g_rate_ms) return 0;
+    if (g_dryrun && g_last_dry_ms && t - g_last_dry_ms < g_rate_ms) return 0;
+    if (repeat && g_last_signal == SIGTERM && v->action != ACT_HARD && since < g_term_grace_ms) return 0;
     if (!repeat && g_pending_pidfd >= 0 && since < g_term_grace_ms) {
         struct pollfd pending = {.fd=g_pending_pidfd, .events=POLLIN};
-        if (poll(&pending, 1, 0) <= 0) return; /* let the previous victim release its memory */
+        if (poll(&pending, 1, 0) <= 0) return 0; /* let the previous victim release its memory */
     }
-    int sig = v->action == ACT_HARD || (repeat && g_last_signal == SIGTERM && since >= g_term_grace_ms)
-            ? SIGKILL : SIGTERM;
+    return v->action == ACT_HARD || (repeat && g_last_signal == SIGTERM && since >= g_term_grace_ms)
+         ? SIGKILL : SIGTERM;
+}
 
-    /* pidfd pins identity across the final check and the signal. No racy
-     * kill(pid) fallback: a reused PID must never turn into a new victim. */
+/* pidfd pins identity across the final check and the signal. No racy
+ * kill(pid) fallback: a reused PID must never turn into a new victim.
+ * Fills the current cgroup path and flags. Returns the pidfd or -1. */
+static int pin_victim(const proc_sample *p, char *current, unsigned *current_flags) {
     int pidfd = (int)syscall(SYS_pidfd_open, p->pid, 0);
-    if (pidfd < 0) { logline("aegis-oom: kill cancelled, pidfd_open unavailable or the process is gone"); return; }
+    if (pidfd < 0) { logline("aegis-oom: kill cancelled, pidfd_open unavailable or the process is gone"); return -1; }
     char path[64], statbuf[4096];
     snprintf(path, sizeof path, "/proc/%d/stat", p->pid);
     int tty = 0; unsigned long long start = 0;
@@ -479,28 +480,68 @@ static void act_kill(int vi, const oom_verdict *v, const mem_state *m) {
         aeg_pid_protected(p->pid, &g_pl)) {
         close(pidfd);
         logline("aegis-oom: kill cancelled, the process is gone, changed or protected");
-        return;
+        return -1;
     }
-    int cgfd = -1;
-    char cgbuf[8192], current[OOM_CGROUP_MAX];
+    char cgbuf[8192];
     snprintf(path, sizeof path, "/proc/%d/cgroup", p->pid);
-    if (read_file(path, cgbuf, sizeof cgbuf) < 0) { close(pidfd); return; }
-    unsigned current_flags = oom_classify_cgroup(cgbuf, current, sizeof current);
-    if (current_flags & PF_FROZEN) {
+    if (read_file(path, cgbuf, sizeof cgbuf) < 0) { close(pidfd); return -1; }
+    *current_flags = oom_classify_cgroup(cgbuf, current, OOM_CGROUP_MAX);
+    if (*current_flags & PF_FROZEN) {
         char freeze_path[512], frozen[32];
         snprintf(freeze_path, sizeof freeze_path, "/sys/fs/cgroup%s/cgroup.freeze", current);
-        if ((current_flags & PF_CG_TRUNC) || read_file(freeze_path, frozen, sizeof frozen) < 0 || atoi(frozen)) {
-            close(pidfd); logline("aegis-oom: kill cancelled, the process is in a frozen cgroup"); return;
+        if ((*current_flags & PF_CG_TRUNC) || read_file(freeze_path, frozen, sizeof frozen) < 0 || atoi(frozen)) {
+            close(pidfd); logline("aegis-oom: kill cancelled, the process is in a frozen cgroup"); return -1;
         }
     }
-    if (sig == SIGKILL && g_cgroup_kill && !(p->flags & PF_CG_TRUNC) &&
-        oom_cgroup_killable(p->cgroup)) {
-        if (!(current_flags & PF_CG_TRUNC) &&
-            !strcmp(current, p->cgroup)) {
-            char full[512]; snprintf(full, sizeof full, "/sys/fs/cgroup%s", p->cgroup);
-            cgfd = aeg_guard_open(full, "/sys/fs/cgroup", &g_pl);
-        }
+    return pidfd;
+}
+
+/* The whole leaf cgroup is a target only for SIGKILL, only when enabled, and
+ * only if the victim is still in the cgroup it was scored in. */
+static int open_cgroup_target(const proc_sample *p, int sig, const char *current, unsigned current_flags) {
+    if (sig != SIGKILL || !g_cgroup_kill || (p->flags & PF_CG_TRUNC) || !oom_cgroup_killable(p->cgroup))
+        return -1;
+    if ((current_flags & PF_CG_TRUNC) || strcmp(current, p->cgroup)) return -1;
+    char full[512]; snprintf(full, sizeof full, "/sys/fs/cgroup%s", p->cgroup);
+    return aeg_guard_open(full, "/sys/fs/cgroup", &g_pl);
+}
+
+/* Consumes cgfd. Returns 1 if sent; *by_cgroup tells which way. */
+static int send_kill(int pidfd, int cgfd, int sig, int *by_cgroup) {
+    int sent = 0;
+    *by_cgroup = 0;
+    if (cgfd >= 0) {
+        int fd = openat(cgfd, "cgroup.kill", O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
+        if (fd >= 0) { sent = write(fd, "1", 1) == 1; close(fd); }
+        close(cgfd);
+        *by_cgroup = sent;
     }
+    if (!sent) sent = syscall(SYS_pidfd_send_signal, pidfd, sig, NULL, 0) == 0;
+    return sent;
+}
+
+static void report_kill(const proc_sample *p, const oom_verdict *v, const mem_state *m, int sig, int by_cgroup) {
+    snprintf(g_lastkill, sizeof g_lastkill,
+        "lastkill %d %ld %s %s %s rss=%ldM swap=%ldM age=%lds grow=%ldM avail=%ldM psi_full=%.1f base=%.1f via=%s cg=%s",
+        p->pid, p->rss_kb, sig == SIGKILL ? "SIGKILL" : "SIGTERM", reason_name(v->reason), p->comm,
+        p->rss_kb / 1024, p->swap_kb / 1024, p->age_s, p->growth_kb / 1024,
+        m->mem_avail_kb / 1024, m->psi_full_avg10, v->psi_baseline,
+        by_cgroup ? "cgroup.kill" : "pidfd", p->cgroup[0] ? p->cgroup : "-");
+    char message[700]; snprintf(message, sizeof message, "KILL: %s", g_lastkill + 9);
+    logline(message);
+}
+
+static void act_kill(int vi, const oom_verdict *v, const mem_state *m) {
+    if (vi < 0) return;
+    proc_sample *p = &g_procs[vi];
+    if (p->pid <= 1 || !p->start_ticks) return;
+    long t = now_ms();
+    int sig = choose_signal(p, v, t);
+    if (!sig) return;
+    char current[OOM_CGROUP_MAX]; unsigned current_flags = 0;
+    int pidfd = pin_victim(p, current, &current_flags);
+    if (pidfd < 0) return;
+    int cgfd = open_cgroup_target(p, sig, current, current_flags);
     if (g_dryrun) {
         char message[256];
         snprintf(message, sizeof message, "DRYRUN would kill: %d %s %s rss=%ldM swap=%ldM via=%s",
@@ -512,27 +553,15 @@ static void act_kill(int vi, const oom_verdict *v, const mem_state *m) {
         close(pidfd);
         return;
     }
-    int sent = 0, by_cgroup = 0;
-    if (cgfd >= 0) {
-        int fd = openat(cgfd, "cgroup.kill", O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
-        if (fd >= 0) { sent = write(fd, "1", 1) == 1; close(fd); }
-        close(cgfd);
-        by_cgroup = sent;
+    int by_cgroup;
+    if (!send_kill(pidfd, cgfd, sig, &by_cgroup)) {
+        close(pidfd); logline("aegis-oom: kill failed, the signal could not be sent"); return;
     }
-    if (!sent) sent = syscall(SYS_pidfd_send_signal, pidfd, sig, NULL, 0) == 0;
-    if (!sent) { close(pidfd); logline("aegis-oom: kill failed, the signal could not be sent"); return; }
     if (g_pending_pidfd >= 0) close(g_pending_pidfd);
     g_pending_pidfd = pidfd;
     g_last_kill_ms = t; g_last_kill_pid = p->pid;
     g_last_kill_start = p->start_ticks; g_last_signal = sig;
-    snprintf(g_lastkill, sizeof g_lastkill,
-        "lastkill %d %ld %s %s %s rss=%ldM swap=%ldM age=%lds grow=%ldM avail=%ldM psi_full=%.1f base=%.1f via=%s cg=%s",
-        p->pid, p->rss_kb, sig == SIGKILL ? "SIGKILL" : "SIGTERM", reason_name(v->reason), p->comm,
-        p->rss_kb / 1024, p->swap_kb / 1024, p->age_s, p->growth_kb / 1024,
-        m->mem_avail_kb / 1024, m->psi_full_avg10, v->psi_baseline,
-        by_cgroup ? "cgroup.kill" : "pidfd", p->cgroup[0] ? p->cgroup : "-");
-    char message[700]; snprintf(message, sizeof message, "KILL: %s", g_lastkill + 9);
-    logline(message);
+    report_kill(p, v, m, sig, by_cgroup);
 }
 
 static void apply_conf_line(const char *line) {

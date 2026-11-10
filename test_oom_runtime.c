@@ -104,7 +104,25 @@ static void soft_escalates_after_term_grace(void) {
     if (g_pending_pidfd >= 0) { close(g_pending_pidfd); g_pending_pidfd = -1; }
 }
 
+static void signal_choice(void) {
+    proc_sample p = {.pid=4242,.start_ticks=7};
+    oom_verdict soft = {.action=ACT_SOFT}, hard = {.action=ACT_HARD};
+    g_dryrun = 0; g_rate_ms = 2000; g_term_grace_ms = 8000; g_pending_pidfd = -1;
+    long t = now_ms();
+    g_last_kill_pid = 0; g_last_kill_ms = 0;
+    EXPECT(choose_signal(&p, &soft, t) == SIGTERM, "first SOFT request is SIGTERM");
+    EXPECT(choose_signal(&p, &hard, t) == SIGKILL, "HARD request is SIGKILL");
+    g_last_kill_pid = 99; g_last_kill_ms = t - 500;
+    EXPECT(choose_signal(&p, &hard, t) == 0, "rate limit holds any kill");
+    g_last_kill_pid = 4242; g_last_kill_start = 7; g_last_signal = SIGTERM; g_last_kill_ms = t - 3000;
+    EXPECT(choose_signal(&p, &soft, t) == 0, "repeat SOFT waits for the TERM grace");
+    g_last_kill_ms = t - 9000;
+    EXPECT(choose_signal(&p, &soft, t) == SIGKILL, "repeat SOFT after the grace escalates");
+    g_last_kill_pid = 0; g_last_kill_ms = 0;
+}
+
 int main(void) {
+    signal_choice();
     config_protect();
     stale_action();
     process_identity_and_tree();
