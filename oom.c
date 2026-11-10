@@ -663,10 +663,7 @@ static int watcher_active(void) {
     return age >= 0 && age <= 3;
 }
 
-int main(int argc, char **argv) {
-    g_self_pid = (int)getpid();
-    g_hz = sysconf(_SC_CLK_TCK); if (g_hz <= 0) g_hz = 100;
-
+static void load_env(void) {
     g_th.psi_soft       = env_d("AEG_OOM_PSI_SOFT", 20.0);
     g_th.psi_hard       = env_d("AEG_OOM_PSI_HARD", 40.0);
     g_th.avail_soft_kb  = env_l("AEG_OOM_AVAIL_SOFT_MB", 0) * 1024;
@@ -690,25 +687,26 @@ int main(int argc, char **argv) {
     g_baseline_alpha    = env_d("AEG_OOM_BASELINE_ALPHA", 0.02);
     const char *st      = getenv("AEG_OOM_STATE"); if (st) g_state_path = st;
     const char *cf      = getenv("AEG_OOM_CONF");  if (cf) g_conf_path = cf;
-    const char *prot = NULL;
+    const char *pp      = getenv("AEG_OOM_PSI_PATH"); if (pp) g_psi_path = pp;
     const char *env_prot = getenv("AEG_OOM_PROTECT");
     if (env_prot) { char line[2048]; snprintf(line, sizeof line, "AEG_OOM_PROTECT=%s", env_prot); apply_conf_line(line); }
+}
 
-    /* Precedence: defaults, environment, config file, flags. The file is read
-     * before the flags so that it never overrides an explicit --protect or --dry-run. */
-    {
-        int pre_conf = 1;
-        for (int i = 1; i < argc; i++)
-            if (!strcmp(argv[i], "--conf") && i + 1 < argc) { g_conf_path = argv[++i]; }
-            else if (!strcmp(argv[i], "--no-conf")) pre_conf = 0;
-        if (pre_conf) {
-            load_conf(g_conf_path);
-        }
-    }
+/* Precedence: defaults, environment, config file, flags. The file is read
+ * before the flags so that it never overrides an explicit --protect or --dry-run. */
+static void load_conf_before_flags(int argc, char **argv) {
+    int pre_conf = 1;
+    for (int i = 1; i < argc; i++)
+        if (!strcmp(argv[i], "--conf") && i + 1 < argc) g_conf_path = argv[++i];
+        else if (!strcmp(argv[i], "--no-conf")) pre_conf = 0;
+    if (pre_conf) load_conf(g_conf_path);
+}
 
-    int once = 0;
+/* returns 0 on success, 2 on a usage error */
+static int parse_args(int argc, char **argv, int *once) {
+    const char *prot = NULL;
     for (int i = 1; i < argc; i++) {
-        if      (!strcmp(argv[i], "--once"))    once = 1;
+        if      (!strcmp(argv[i], "--once"))    *once = 1;
         else if (!strcmp(argv[i], "--dry-run")) { g_dryrun = 1; g_cli_dryrun = 1; }
         else if (!strcmp(argv[i], "--live"))    { g_dryrun = 0; g_cli_dryrun = 1; }
         else if (!strcmp(argv[i], "--no-arm"))  g_arm = 0;
@@ -725,49 +723,62 @@ int main(int argc, char **argv) {
         }
         else { logline("aegis-oom: unknown argument or missing value"); return 2; }
     }
-
     /* the protect list stays as a manual override on top of smart protection */
     if (prot) oom_parse_protect(prot, &g_pl);
-    validate_runtime_settings();
-    if (g_force != ACT_NONE && (!once || !g_scope)) { logline("aegis-oom: --force requires --once and a separate --scope"); return 2; }
-    if (!once) ensure_rundir();
-    learn_load();
+    if (g_force != ACT_NONE && (!*once || !g_scope)) { logline("aegis-oom: --force requires --once and a separate --scope"); return 2; }
+    return 0;
+}
+
+static void setup_signals(void) {
     signal(SIGTERM, on_term); signal(SIGINT, on_term); signal(SIGHUP, on_hup);
-    if (g_arm) arm();
+}
 
-    if (once) return run_once();
-
-    /* PSI trigger on the root cgroup memory.pressure. Without it the loop polls on a timeout. */
-    const char *pp = getenv("AEG_OOM_PSI_PATH"); if (pp) g_psi_path = pp;
-    int pfd = open(g_psi_path, O_RDWR | O_CLOEXEC);
-    int have_trigger = 0;
-    if (pfd >= 0) {
+/* PSI trigger on the root cgroup memory.pressure. Without it the loop polls on a timeout.
+ * Returns the epoll fd, or -1; *pfd is the PSI fd or -1. */
+static int open_wakeup(int *pfd, int *have_trigger) {
+    *pfd = open(g_psi_path, O_RDWR | O_CLOEXEC);
+    *have_trigger = 0;
+    if (*pfd >= 0) {
         char trig[64];
         int tl = snprintf(trig, sizeof trig, "some %ld %ld", g_psi_stall_us, g_psi_window_us);
-        if (write(pfd, trig, (size_t)tl) == tl) have_trigger = 1;
+        if (write(*pfd, trig, (size_t)tl) == tl) *have_trigger = 1;
         else logline("aegis-oom: PSI trigger rejected, falling back to polling");
     } else {
         logline("aegis-oom: PSI unavailable, falling back to polling");
     }
     int ep = epoll_create1(EPOLL_CLOEXEC);
-    if (ep < 0) { logline("aegis-oom: epoll_create1 failed"); if (pfd >= 0) close(pfd); return 1; }
-    if (have_trigger) {
-        struct epoll_event ev = { .events = EPOLLPRI, .data.fd = pfd };
-        if (epoll_ctl(ep, EPOLL_CTL_ADD, pfd, &ev) < 0) {
-            have_trigger = 0;
+    if (ep < 0) { logline("aegis-oom: epoll_create1 failed"); return -1; }
+    if (*have_trigger) {
+        struct epoll_event ev = { .events = EPOLLPRI, .data.fd = *pfd };
+        if (epoll_ctl(ep, EPOLL_CTL_ADD, *pfd, &ev) < 0) {
+            *have_trigger = 0;
             logline("aegis-oom: epoll_ctl failed, falling back to polling");
         }
     }
-    {
-        mem_state m0; read_mem_state(&m0); thresholds th = cycle_thresholds(&m0);
-        char b[256]; snprintf(b, sizeof b,
-            "aegis-oom armed (mode=%s wake=%s psi_soft=%.0f psi_hard=%.0f avail_soft=%ldMiB avail_hard=%ldMiB smart=%d sustain=%d cgroup_kill=%d)",
-            g_dryrun ? "DRY" : "LIVE", have_trigger ? "PSI-trigger" : "poll",
-            th.psi_soft, th.psi_hard, th.avail_soft_kb / 1024, th.avail_hard_kb / 1024,
-            g_th.protect_smart, g_th.sustain_n, g_cgroup_kill);
-        logline(b);
-    }
+    return ep;
+}
 
+static void log_armed(int have_trigger) {
+    mem_state m0; read_mem_state(&m0); thresholds th = cycle_thresholds(&m0);
+    char b[256]; snprintf(b, sizeof b,
+        "aegis-oom armed (mode=%s wake=%s psi_soft=%.0f psi_hard=%.0f avail_soft=%ldMiB avail_hard=%ldMiB smart=%d sustain=%d cgroup_kill=%d)",
+        g_dryrun ? "DRY" : "LIVE", have_trigger ? "PSI-trigger" : "poll",
+        th.psi_soft, th.psi_hard, th.avail_soft_kb / 1024, th.avail_hard_kb / 1024,
+        g_th.protect_smart, g_th.sustain_n, g_cgroup_kill);
+    logline(b);
+}
+
+static void reload_conf(void) {
+    if (!g_no_conf) load_conf(g_conf_path);
+    validate_runtime_settings();
+    char b[256]; snprintf(b, sizeof b,
+        "aegis-oom: config reloaded psi_hard=%.0f soft_pct=%.1f hard_pct=%.1f sustain=%d smart=%d dryrun=%d",
+        g_th.psi_hard, g_th.avail_soft_pct, g_th.avail_hard_pct,
+        g_th.sustain_n, g_th.protect_smart, g_dryrun);
+    logline(b);
+}
+
+static void run_loop(int ep) {
     unsigned cycle = 0;
     int wait_ms = g_refresh_ms;
     int n = 0;                       /* size of the last candidate snapshot */
@@ -776,23 +787,13 @@ int main(int argc, char **argv) {
         struct epoll_event out;
         /* A PSI event wakes us at once; the timeout is the polling fallback for the avail threshold. */
         int woke = epoll_wait(ep, &out, 1, wait_ms);
-        if (g_reload) {
-            g_reload = 0;
-            if (!g_no_conf) load_conf(g_conf_path);
-            validate_runtime_settings();
-            char b[256]; snprintf(b, sizeof b,
-                "aegis-oom: config reloaded psi_hard=%.0f soft_pct=%.1f hard_pct=%.1f sustain=%d smart=%d dryrun=%d",
-                g_th.psi_hard, g_th.avail_soft_pct, g_th.avail_hard_pct,
-                g_th.sustain_n, g_th.protect_smart, g_dryrun);
-            logline(b);
-        }
+        if (g_reload) { g_reload = 0; reload_conf(); }
 
         /* The cheap part: two files. They are enough to decide whether to kill. */
         mem_state m; read_mem_state(&m);
-
         thresholds th = cycle_thresholds(&m);
 
-        /* Distance to the threshold sets the pace: far away = sleep long, close = often. */
+        /* Distance to the threshold sets the pace: far away sleeps long, close polls often. */
         int near = (m.mem_avail_kb >= 0 && th.avail_soft_kb > 0 &&
                     m.mem_avail_kb <= th.avail_soft_kb * 4) ||
                    m.psi_some_avg10 >= g_th.psi_soft / 2.0;
@@ -827,7 +828,32 @@ int main(int argc, char **argv) {
         write_state(n, &m, &v, (int)(now - last_scan));
         if (now - last_learn >= 300) { learn_save(); last_learn = now; }
     }
+}
+
+int main(int argc, char **argv) {
+    g_self_pid = (int)getpid();
+    g_hz = sysconf(_SC_CLK_TCK); if (g_hz <= 0) g_hz = 100;
+
+    load_env();
+    load_conf_before_flags(argc, argv);
+    int once = 0;
+    int rc = parse_args(argc, argv, &once);
+    if (rc) return rc;
+    validate_runtime_settings();
+    if (!once) ensure_rundir();
+    learn_load();
+    setup_signals();
+    if (g_arm) arm();
+
+    if (once) return run_once();
+
+    int pfd, have_trigger;
+    int ep = open_wakeup(&pfd, &have_trigger);
+    if (ep < 0) { if (pfd >= 0) close(pfd); return 1; }
+    log_armed(have_trigger);
+    run_loop(ep);
     learn_save();
-    close(ep); close(pfd);
+    close(ep);
+    if (pfd >= 0) close(pfd);
     return 0;
 }
