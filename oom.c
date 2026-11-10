@@ -221,7 +221,8 @@ static int read_proc(int pid, proc_sample *s) {
     s->flags = 0; s->age_s = -1; s->growth_kb = 0; s->cgroup[0] = 0;
     snprintf(path, sizeof path, "/proc/%d/oom_score_adj", pid);
     char b[32]; s->oom_score_adj = 0;
-    if (read_file(path, b, sizeof b) >= 0) s->oom_score_adj = atoi(b);
+    long adj;
+    if (read_file(path, b, sizeof b) >= 0 && aeg_parse_long(b, -1000, 1000, &adj)) s->oom_score_adj = (int)adj;
     if (pid == g_self_pid) s->flags |= PF_SELF;
 
     snprintf(path, sizeof path, "/proc/%d/stat", pid);
@@ -278,7 +279,9 @@ static void enrich(proc_sample *s, long up) {
     if ((s->flags & PF_FROZEN) && !(s->flags & PF_CG_TRUNC)) {
         snprintf(path, sizeof path, "/sys/fs/cgroup%s/cgroup.freeze", s->cgroup);
         char frozen[32];
-        if (read_file(path, frozen, sizeof frozen) >= 0 && atoi(frozen) == 0) s->flags &= ~PF_FROZEN;
+        long fz;
+        if (read_file(path, frozen, sizeof frozen) >= 0 && aeg_parse_long(frozen, 0, 1, &fz) && fz == 0)
+            s->flags &= ~PF_FROZEN;
     }
 
     if (has_gui_fd(s->pid)) s->flags |= PF_SESSION;
@@ -297,8 +300,8 @@ static int scan_proc_dir(void) {
             off += e->d_reclen;
             const char *nm = e->d_name;
             if (nm[0] < '1' || nm[0] > '9') continue;
-            int pid = atoi(nm);
-            if (pid > 0 && read_proc(pid, &g_procs[n]) == 0) n++;
+            long pid;
+            if (aeg_parse_long(nm, 1, INT_MAX, &pid) && read_proc((int)pid, &g_procs[n]) == 0) n++;
         }
     }
     close(fd);
@@ -310,10 +313,11 @@ static int scan_all(void) {
         char path[512]; snprintf(path, sizeof path, "%s/cgroup.procs", g_scope);
         if (read_file(path, g_dbuf, sizeof g_dbuf) < 0) return 0;
         int n = 0; char *p = g_dbuf;
-        while (*p && n < OOM_MAX_PROCS) {
-            int pid = atoi(p);
-            if (pid > 0 && read_proc(pid, &g_procs[n]) == 0) n++;
-            char *nl = strchr(p, '\n'); if (!nl) break; p = nl + 1;
+        while (p && *p && n < OOM_MAX_PROCS) {
+            char *nl = strchr(p, '\n'); if (nl) *nl = 0;
+            long pid;
+            if (aeg_parse_long(p, 1, INT_MAX, &pid) && read_proc((int)pid, &g_procs[n]) == 0) n++;
+            p = nl ? nl + 1 : 0;
         }
         return n;
     }
@@ -490,7 +494,9 @@ static int pin_victim(const proc_sample *p, char *current, unsigned *current_fla
     if (*current_flags & PF_FROZEN) {
         char freeze_path[512], frozen[32];
         snprintf(freeze_path, sizeof freeze_path, "/sys/fs/cgroup%s/cgroup.freeze", current);
-        if ((*current_flags & PF_CG_TRUNC) || read_file(freeze_path, frozen, sizeof frozen) < 0 || atoi(frozen)) {
+        long fz;
+        if ((*current_flags & PF_CG_TRUNC) || read_file(freeze_path, frozen, sizeof frozen) < 0 ||
+            !aeg_parse_long(frozen, 0, 1, &fz) || fz) {
             close(pidfd); logline("aegis-oom: kill cancelled, the process is in a frozen cgroup"); return -1;
         }
     }
@@ -638,12 +644,14 @@ static void learn_load(void) {
     if (!g_learning) return;
     char b[256];
     if (read_file(g_learn_path, b, sizeof b) <= 0) return;
-    g_baseline = atof(b);
+    char *end = NULL;
+    double v = strtod(b, &end);
+    if (end != b && (*end == '\n' || !*end) && isfinite(v) && v >= 0 && v <= 100) g_baseline = v;
 }
 
 static void learn_save(void) {
     if (!g_learning) return;
-    mkdir("/var/lib/aegis", 0755);
+    if (!strcmp(g_learn_path, "/var/lib/aegis/learned")) mkdir("/var/lib/aegis", 0755);
     char tmp[256], buf[256];
     snprintf(tmp, sizeof tmp, "%s.tmp", g_learn_path);
     int n = snprintf(buf, sizeof buf, "%.4f\n", g_baseline);

@@ -1,7 +1,10 @@
 #ifndef AEG_COMMON_H
 #define AEG_COMMON_H
 /* Helpers shared by aegis-oom and aegis-reaper. Header only, no heap allocation. */
+#include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
+#include <stdlib.h>
 #include <sched.h>
 #include <signal.h>
 #include <stdint.h>
@@ -31,6 +34,19 @@ static inline int read_file(const char *path, char *buf, size_t n) {
     close(fd);
     if (k < 0) return -1;
     buf[k] = 0; return (int)k;
+}
+
+/* Checked decimal: digits with an optional sign, then only whitespace, within
+ * [min, max]. Returns 1 and sets *out on success. */
+static inline int aeg_parse_long(const char *s, long min, long max, long *out) {
+    char *end = NULL;
+    errno = 0;
+    long v = strtol(s, &end, 10);
+    if (errno || end == s) return 0;
+    while (*end == ' ' || *end == '\t' || *end == '\n') end++;
+    if (*end || v < min || v > max) return 0;
+    *out = v;
+    return 1;
 }
 
 static volatile sig_atomic_t g_stop = 0;

@@ -75,9 +75,8 @@ static long read_long_at(const char *dir, const char *name) {
     close(fd);
     if (k <= 0) return -1;
     buf[k] = 0;
-    long v = 0; const char *c = buf;
-    while (*c >= '0' && *c <= '9') { v = v * 10 + (*c - '0'); c++; }
-    return v;
+    long v;
+    return aeg_parse_long(buf, 0, LONG_MAX, &v) ? v : -1;
 }
 
 /* recursive walk: find the leaf cgroup with the highest pids.current.
@@ -114,8 +113,7 @@ static void scan(char *path, size_t plen, int depth) {
         if (guard >= 0) {
             close(guard);
             best_pids = p;
-            strncpy(best_path, path, PATHMAX - 1);
-            best_path[PATHMAX - 1] = 0;
+            snprintf(best_path, sizeof best_path, "%s", path);   /* path is shorter than PATHMAX */
         }
     }
 }
@@ -168,10 +166,13 @@ static void check_target_file(void) {
 }
 
 int main(int argc, char **argv) {
-    if (argc > 1) threshold = atol(argv[1]);
+    if (argc > 4 || (argc > 1 && !aeg_parse_long(argv[1], 1, INT_MAX, &threshold)) ||
+        (argc > 2 && argv[2][0] != '/') ||
+        (argc > 3 && !aeg_parse_long(argv[3], 1, INT_MAX, &leaf_min))) {
+        logline("usage: aegis-reaper [THRESHOLD [/sys/fs/cgroup/WATCHED [LEAF_MIN]]]");
+        return 2;
+    }
     if (argc > 2) user_slice = argv[2];
-    if (argc > 3) leaf_min = atol(argv[3]);
-    if (threshold < 1 || leaf_min < 1 || user_slice[0] != '/') return 2;
     load_protection();
     setup_signals();
     arm("aegis-reaper");

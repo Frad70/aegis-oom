@@ -134,7 +134,23 @@ static void signal_choice(void) {
     g_last_kill_pid = 0; g_last_kill_ms = 0;
 }
 
+static void learned_baseline_is_checked(void) {
+    char path[] = "/tmp/aegis-learned-XXXXXX";
+    int fd = mkstemp(path);
+    EXPECT(fd >= 0, "learned fixture"); if (fd < 0) return;
+    EXPECT(write(fd, "nonsense\n", 9) == 9, "learned fixture write");
+    close(fd);
+    g_learn_path = path; g_learning = 1; g_baseline = 3.0;
+    learn_load();
+    EXPECT(g_baseline == 3.0, "a corrupt learned file keeps the baseline");
+    g_baseline = 12.5; learn_save(); g_baseline = 0; learn_load();
+    EXPECT(g_baseline == 12.5, "learned baseline round trip");
+    unlink(path);
+    g_learning = 0;
+}
+
 int main(void) {
+    learned_baseline_is_checked();
     signal_choice();
     config_protect();
     stale_action();

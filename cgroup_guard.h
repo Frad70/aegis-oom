@@ -40,7 +40,8 @@ static inline int aeg_pid_protected(int pid, const protect_list *pl) {
         if (pl && oom_is_protected(p.comm, pl)) return 1;
         snprintf(path, sizeof path, "/proc/%d/oom_score_adj", pid);
         if (aeg_guard_read(path, buf, sizeof buf) < 0) return errno == ENOENT ? 0 : 1;
-        if (atoi(buf) <= OOM_ADJ_IMMUNE) return 1;
+        long adj;
+        if (!aeg_parse_long(buf, -1000, 1000, &adj) || adj <= OOM_ADJ_IMMUNE) return 1;
         if (p.ppid == pid || p.ppid < 0) return 1;
         pid = p.ppid;
     }

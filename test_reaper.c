@@ -44,7 +44,19 @@ static void config(void) {
     unlink(conf_path);
 }
 
+static void checked_numbers(void) {
+    long v = 0;
+    EXPECT(aeg_parse_long("8000", 1, INT_MAX, &v) && v == 8000, "plain number");
+    EXPECT(aeg_parse_long("-1000\n", -1000, 1000, &v) && v == -1000, "kernel file with newline");
+    EXPECT(!aeg_parse_long("12x", 1, INT_MAX, &v), "trailing garbage rejected");
+    EXPECT(!aeg_parse_long("", 1, INT_MAX, &v), "empty rejected");
+    EXPECT(!aeg_parse_long("0", 1, INT_MAX, &v), "below range rejected");
+    EXPECT(!aeg_parse_long("99999999999999999999", 1, INT_MAX, &v), "overflow rejected");
+    EXPECT(!aeg_parse_long("2147483648", 1, INT_MAX, &v), "above int range rejected");
+}
+
 int main(void) {
+    checked_numbers();
     config();
     if (failures) return 1;
     puts("OK: reaper");
