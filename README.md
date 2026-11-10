@@ -120,7 +120,7 @@ Never a victim, whatever the config says:
 - PID 1, the daemon itself, its parent and its session leader;
 - processes with `oom_score_adj=-1000`;
 - kernel threads and zombies (no resident memory);
-- processes in a frozen cgroup under `/sys/fs/cgroup/aegis-freeze/`;
+- processes in a frozen cgroup under `/sys/fs/cgroup/oom-freezer/`;
 - names in `AEG_OOM_PROTECT`, and their descendants. Inheritance stops at
   shells, terminals, compositors, `systemd` and `sshd`, so protecting one app
   started from a terminal does not protect everything else started there.

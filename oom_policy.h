@@ -17,7 +17,7 @@
 #define PF_SYSTEM_SVC 0x08   /* system.slice: a systemd service */
 #define PF_SELF       0x10   /* the daemon itself, its parent or its session leader */
 #define PF_CG_TRUNC   0x20   /* cgroup path did not fit the buffer: never kill by it */
-#define PF_FROZEN     0x40   /* in a frozen cgroup under /aegis-freeze/ */
+#define PF_FROZEN     0x40   /* in a frozen cgroup under /oom-freezer/ */
 #define PF_PROTECTED_TREE 0x80 /* descendant of a protected application */
 
 typedef struct {

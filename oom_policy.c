@@ -296,7 +296,7 @@ unsigned oom_classify_cgroup(const char *buf, char *out, int outlen) {
         if (copy < len) flags |= PF_CG_TRUNC;   /* a truncated path does not address a cgroup */
     }
     if (strncmp(path, "/system.slice", 13) == 0) flags |= PF_SYSTEM_SVC;
-    if (strncmp(path, "/aegis-freeze/", 14) == 0) flags |= PF_FROZEN;
+    if (strncmp(path, "/oom-freezer/", sizeof("/oom-freezer/") - 1) == 0) flags |= PF_FROZEN;
     return flags;   /* PF_SESSION comes from an open GPU node, not from the cgroup */
 }
 
