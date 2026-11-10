@@ -10,6 +10,8 @@
 #include <unistd.h>
 #include <sys/mman.h>
 
+#define AEG_RT_PRIORITY 40   /* SCHED_FIFO priority, same as CPUSchedulingPriority in the units */
+
 struct ld64 { uint64_t d_ino, d_off; uint16_t d_reclen; uint8_t d_type; char d_name[]; };
 
 static inline void logline(const char *s) {
@@ -54,7 +56,7 @@ static inline void arm(const char *who) {
         snprintf(b, sizeof b, "%s: hardening failed, mlockall refused; under pressure this daemon may be swapped out", who);
         logline(b);
     }
-    struct sched_param sp; sp.sched_priority = 40;
+    struct sched_param sp; sp.sched_priority = AEG_RT_PRIORITY;
     if (sched_setscheduler(0, SCHED_FIFO, &sp) != 0) {
         snprintf(b, sizeof b, "%s: hardening failed, SCHED_FIFO not set; under CPU saturation this daemon may not get time", who);
         logline(b);

@@ -2,6 +2,25 @@
 #include <string.h>
 #include <stdlib.h>
 
+/* victim score weights */
+#define SWAP_WEIGHT      0.25   /* swapped memory frees only a fraction of RAM */
+#define GROWTH_WEIGHT    2.0    /* growth since the last sample: the likely cause */
+#define GUI_FACTOR       0.15   /* holds a GPU node: an app of the live session */
+#define SERVICE_FACTOR   0.60   /* system.slice */
+#define AGE_DAY_FACTOR   0.35   /* running longer than a day */
+#define AGE_HOUR_FACTOR  0.60   /* running longer than an hour */
+#define FRESH_FACTOR     1.25   /* started less than a minute ago; also the bound before enrichment */
+#define AGE_DAY_S        86400
+#define AGE_HOUR_S       3600
+#define AGE_FRESH_S      60
+#define ADJ_FACTOR_MIN   0.001
+
+/* clamp rails for thresholds computed from percentages */
+#define AVAIL_HARD_MIN_KB (128L*1024)
+#define AVAIL_HARD_MAX_KB (1024L*1024)
+#define AVAIL_SOFT_MIN_KB (384L*1024)
+#define AVAIL_SOFT_MAX_KB (3072L*1024)
+
 /* All parsers expect a NUL-terminated buf (the caller always terminates it via read_file). */
 
 int oom_parse_protect(const char *csv, protect_list *pl) {
@@ -52,25 +71,25 @@ long oom_victim_score(const proc_sample *p, const protect_list *pl, const thresh
      * its contribution so a mostly swapped idle app is not the scapegoat. */
     long swap = p->swap_kb > 0 ? p->swap_kb : 0;
     if (swap > p->rss_kb) swap = p->rss_kb;
-    double base = (double)p->rss_kb + (double)swap * 0.25;
+    double base = (double)p->rss_kb + (double)swap * SWAP_WEIGHT;
     /* a growing process is the likely cause of pressure, not a large bystander */
-    if (p->growth_kb > 0) base += (double)p->growth_kb * 2.0;
+    if (p->growth_kb > 0) base += (double)p->growth_kb * GROWTH_WEIGHT;
 
     if (t && t->protect_smart && (p->flags & PF_ENRICHED)) {
-        if (p->flags & PF_SESSION)    base *= 0.15;   /* GUI app of the live session */
-        if (p->flags & PF_SYSTEM_SVC) base *= 0.60;
-        if (p->age_s > 86400)         base *= 0.35;
-        else if (p->age_s > 3600)     base *= 0.60;
-        else if (p->age_s >= 0 && p->age_s < 60) base *= 1.25;
+        if (p->flags & PF_SESSION)    base *= GUI_FACTOR;
+        if (p->flags & PF_SYSTEM_SVC) base *= SERVICE_FACTOR;
+        if (p->age_s > AGE_DAY_S)     base *= AGE_DAY_FACTOR;
+        else if (p->age_s > AGE_HOUR_S) base *= AGE_HOUR_FACTOR;
+        else if (p->age_s >= 0 && p->age_s < AGE_FRESH_S) base *= FRESH_FACTOR;
     } else if (t && t->protect_smart) {
         /* Upper bound until enrichment. A lower bound would hide a genuine
          * candidate below discounted GUI processes. */
-        base *= 1.25;
+        base *= FRESH_FACTOR;
     }
     /* the kernel hint is a multiplier, not an addend: a 35 MB helper with adj=+300
      * must not outrank a process ten times larger. */
     double k = 1.0 + (double)p->oom_score_adj / OOM_ADJ_SCALE;
-    if (k < 0.001) k = 0.001;
+    if (k < ADJ_FACTOR_MIN) k = ADJ_FACTOR_MIN;
     double score = base * k;
     if (score < 1) score = 1;
     return (long)score;
@@ -91,10 +110,10 @@ void oom_resolve_thresholds(const mem_state *m, thresholds *t) {
     if (m->mem_total_kb > 0) {
         if (t->avail_hard_pct > 0)
             t->avail_hard_kb = clampl((long)(m->mem_total_kb * t->avail_hard_pct / 100.0),
-                                      128L*1024, 1024L*1024);
+                                      AVAIL_HARD_MIN_KB, AVAIL_HARD_MAX_KB);
         if (t->avail_soft_pct > 0)
             t->avail_soft_kb = clampl((long)(m->mem_total_kb * t->avail_soft_pct / 100.0),
-                                      384L*1024, 3072L*1024);
+                                      AVAIL_SOFT_MIN_KB, AVAIL_SOFT_MAX_KB);
     }
 
     if (t->avail_soft_kb < t->avail_hard_kb) t->avail_soft_kb = t->avail_hard_kb;

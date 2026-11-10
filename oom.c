@@ -25,12 +25,20 @@
 #include <math.h>
 
 #define ENRICH_TOP 32            /* enrich only the largest candidates; the rest cannot win */
-#define PREV_SLOTS 16384         /* pid -> previous-cycle footprint hash (power of two) */
+#define ENRICH_EVERY 4           /* idle cycles between enrichment passes */
+#define PREV_SLOTS 16384         /* pid to previous-cycle footprint hash (power of two) */
+#define PREV_PROBE 8             /* linear probe window of that hash */
+#define HASH_MULT 2654435761u    /* Knuth multiplicative hash */
+#define ANCESTRY_MAX 64          /* deepest parent chain walked for protection */
+#define FD_SCAN_MAX 512          /* open fds inspected per candidate for a GPU node */
+#define NEAR_FACTOR 4            /* avail below soft threshold times this counts as near */
+#define WATCH_FRESH_S 3          /* a watch file touched this recently means a monitor is open */
+#define LEARN_SAVE_S 300         /* how often the learned baseline is written */
 
 /* config: environment, then the config file, then flags; SIGHUP rereads the file */
 static protect_list g_pl;
 static thresholds   g_th;
-static int          g_dryrun = 1;
+static int          g_dryrun = 1;         /* every numeric default lives in k_settings */
 static int          g_arm = 1;
 static const char  *g_scope = 0;         /* cgroup dir, or NULL = all of /proc */
 static const char  *g_state_path = "/run/aegis/oom.state";
@@ -77,44 +85,66 @@ static int    g_self_pid = 0;
 static const char *g_learn_path = "/var/lib/aegis/learned";
 
 
-static int numeric_tail(const char *tail) {
-    while (*tail == ' ' || *tail == '\t') tail++;
-    return !*tail || *tail == '#' || *tail == '\r' || *tail == '\n';
+/* Every numeric setting: key, destination, type (d double, i int, l long,
+ * m MiB stored as kB), default and accepted range. Values outside the range
+ * are rejected from the environment and the config file alike. */
+typedef struct { const char *key; void *dst; char type; double def, min, max; } num_setting;
+static const num_setting k_settings[] = {
+    {"AEG_OOM_AVAIL_SOFT_MB",  &g_th.avail_soft_kb,  'm', 0,       1,      1048576},
+    {"AEG_OOM_AVAIL_HARD_MB",  &g_th.avail_hard_kb,  'm', 0,       1,      1048576},
+    {"AEG_OOM_PSI_SOFT",       &g_th.psi_soft,       'd', 20,      0.1,    100},
+    {"AEG_OOM_PSI_HARD",       &g_th.psi_hard,       'd', 40,      0.1,    100},
+    {"AEG_OOM_BASELINE_K",     &g_th.baseline_k,     'd', 2,       1,      100},
+    {"AEG_OOM_AVAIL_SOFT_PCT", &g_th.avail_soft_pct, 'd', 4,       0,      90},
+    {"AEG_OOM_AVAIL_HARD_PCT", &g_th.avail_hard_pct, 'd', 1.5,     0,      90},
+    {"AEG_OOM_SUSTAIN_N",      &g_th.sustain_n,      'i', 3,       1,      120},
+    {"AEG_OOM_PROTECT_SMART",  &g_th.protect_smart,  'i', 1,       0,      1},
+    {"AEG_OOM_CGROUP_KILL",    &g_cgroup_kill,       'i', 0,       0,      1},
+    {"AEG_OOM_DRYRUN",         &g_dryrun,            'i', 1,       0,      1},
+    {"AEG_OOM_RATE_MS",        &g_rate_ms,           'l', 2000,    100,    60000},
+    {"AEG_OOM_REFRESH_MS",     &g_refresh_ms,        'i', 1500,    100,    60000},
+    {"AEG_OOM_IDLE_MS",        &g_idle_ms,           'i', 6000,    100,    60000},
+    {"AEG_OOM_IDLE_SCAN_S",    &g_idle_scan_s,       'i', 60,      1,      3600},
+    {"AEG_OOM_BASELINE_ALPHA", &g_baseline_alpha,    'd', 0.02,    0.0001, 1},
+    {"AEG_OOM_TERM_GRACE_MS",  &g_term_grace_ms,     'l', 8000,    1000,   60000},
+    {"AEG_OOM_PSI_STALL_US",   &g_psi_stall_us,      'l', 150000,  1,      10000000},
+    {"AEG_OOM_PSI_WINDOW_US",  &g_psi_window_us,     'l', 1000000, 500000, 10000000},
+};
+#define N_SETTINGS (sizeof k_settings / sizeof k_settings[0])
+
+static double setting_get(const num_setting *e) {
+    switch (e->type) {
+        case 'd': return *(double *)e->dst;
+        case 'i': return *(int *)e->dst;
+        case 'm': return *(long *)e->dst / 1024.0;
+        default:  return (double)*(long *)e->dst;
+    }
 }
 
-static double env_d(const char *k, double def) {
-    const char *v = getenv(k); char *end = NULL;
-    if (!v) return def;
-    errno = 0; double n = strtod(v, &end);
-    return errno || end == v || !numeric_tail(end) || !isfinite(n) ? def : n;
-}
-static long env_l(const char *k, long def) {
-    const char *v = getenv(k); char *end = NULL;
-    if (!v) return def;
-    errno = 0; long n = strtol(v, &end, 10);
-    return errno || end == v || !numeric_tail(end) || n < 0 || n > INT_MAX ? def : n;
+static void setting_set(const num_setting *e, double v) {
+    switch (e->type) {
+        case 'd': *(double *)e->dst = v; break;
+        case 'i': *(int *)e->dst = (int)v; break;
+        case 'm': *(long *)e->dst = (long)v * 1024; break;
+        default:  *(long *)e->dst = (long)v; break;
+    }
 }
 
+static void apply_defaults(void) {
+    for (size_t i = 0; i < N_SETTINGS; i++) setting_set(&k_settings[i], k_settings[i].def);
+}
+
+/* Out of range values fall back to the default; 0 MiB means "use the percentage". */
 static void validate_runtime_settings(void) {
-    if (g_refresh_ms < 100 || g_refresh_ms > 60000) g_refresh_ms = 1500;
+    for (size_t i = 0; i < N_SETTINGS; i++) {
+        const num_setting *e = &k_settings[i];
+        double v = setting_get(e);
+        if (e->type == 'm' && v == 0) continue;
+        if (v < e->min || v > e->max) setting_set(e, e->def);
+    }
     if (g_idle_ms < g_refresh_ms) g_idle_ms = g_refresh_ms;
-    if (g_idle_ms > 60000) g_idle_ms = 60000;
-    if (g_idle_scan_s < 1 || g_idle_scan_s > 3600) g_idle_scan_s = 60;
-    if (g_rate_ms < 100 || g_rate_ms > 60000) g_rate_ms = 2000;
-    if (g_term_grace_ms < 1000 || g_term_grace_ms > 60000) g_term_grace_ms = 8000;
-    if (g_dryrun < 0 || g_dryrun > 1) g_dryrun = 1;
-    if (g_cgroup_kill < 0 || g_cgroup_kill > 1) g_cgroup_kill = 0;
-    if (g_th.sustain_n < 1 || g_th.sustain_n > 120) g_th.sustain_n = 3;
-    if (g_th.psi_soft < 0.1 || g_th.psi_soft > 100) g_th.psi_soft = 20;
-    if (g_th.psi_hard < 0.1 || g_th.psi_hard > 100) g_th.psi_hard = 40;
-    if (g_th.baseline_k < 1 || g_th.baseline_k > 100) g_th.baseline_k = 2;
-    if (g_th.avail_soft_pct < 0 || g_th.avail_soft_pct > 90) g_th.avail_soft_pct = 4;
-    if (g_th.avail_hard_pct < 0 || g_th.avail_hard_pct > 90) g_th.avail_hard_pct = 1.5;
-    if (g_baseline_alpha < 0.0001 || g_baseline_alpha > 1) g_baseline_alpha = 0.02;
-    if (g_psi_window_us < 500000 || g_psi_window_us > 10000000) g_psi_window_us = 1000000;
-    if (g_psi_stall_us < 1 || g_psi_stall_us >= g_psi_window_us) g_psi_stall_us = g_psi_window_us / 2;
+    if (g_psi_stall_us >= g_psi_window_us) g_psi_stall_us = g_psi_window_us / 2;
 }
-
 
 static long now_ms(void) {
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -153,11 +183,11 @@ static long uptime_s(void) {
 }
 
 /* previous footprints: a growing process matters more than its absolute size */
-static unsigned prev_slot(int pid) { return ((unsigned)pid * 2654435761u) & (PREV_SLOTS - 1); }
+static unsigned prev_slot(int pid) { return ((unsigned)pid * HASH_MULT) & (PREV_SLOTS - 1); }
 
 static long prev_foot_get(int pid, unsigned long long start) {
     unsigned s = prev_slot(pid);
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < PREV_PROBE; i++) {
         unsigned k = (s + (unsigned)i) & (PREV_SLOTS - 1);
         if (g_prev_pid[k] == pid) return g_prev_start[k] == start ? g_prev_foot[k] : -1;
         if (g_prev_pid[k] == 0) return -1;
@@ -167,7 +197,7 @@ static long prev_foot_get(int pid, unsigned long long start) {
 
 static void prev_foot_put(int pid, unsigned long long start, long foot) {
     unsigned s = prev_slot(pid);
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < PREV_PROBE; i++) {
         unsigned k = (s + (unsigned)i) & (PREV_SLOTS - 1);
         if (g_prev_pid[k] == pid || g_prev_pid[k] == 0) {
             g_prev_pid[k] = pid; g_prev_start[k] = start; g_prev_foot[k] = foot; return;
@@ -215,14 +245,14 @@ static int has_gui_fd(int pid) {
     if (dfd < 0) return 0;
     char buf[8192], link[256];
     int found = 0, seen = 0;
-    while (!found && seen < 512) {
+    while (!found && seen < FD_SCAN_MAX) {
         long r = syscall(SYS_getdents64, dfd, buf, sizeof buf);
         if (r <= 0) break;
         for (long off = 0; off < r; ) {
             struct ld64 *e = (struct ld64 *)(buf + off);
             off += e->d_reclen;
             if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;
-            if (++seen > 512) break;
+            if (++seen > FD_SCAN_MAX) break;
             ssize_t k = readlinkat(dfd, e->d_name, link, sizeof link - 1);
             if (k > 0) { link[k] = 0; if (oom_link_is_gui(link)) { found = 1; break; } }
         }
@@ -299,7 +329,7 @@ static void inherit_protection(int n) {
     }
     for (int i = 0; i < n; i++) {
         proc_sample *p = &g_procs[i];
-        for (int depth = 0; depth < 64; depth++) {
+        for (int depth = 0; depth < ANCESTRY_MAX; depth++) {
             if (depth && oom_ancestry_boundary(p->comm)) break;
             if ((p->flags & PF_PROTECTED_TREE) || oom_is_protected(p->comm, &g_pl) || p->oom_score_adj <= OOM_ADJ_IMMUNE) {
                 g_procs[i].flags |= PF_PROTECTED_TREE;
@@ -546,40 +576,20 @@ static void apply_conf_kv(const char *key, const char *val) {
         }
         return;
     }
-    struct { const char *key; void *dst; char type; double min, max; } map[] = {
-        {"AEG_OOM_PSI_SOFT", &g_th.psi_soft, 'd', 0.1, 100},
-        {"AEG_OOM_PSI_HARD", &g_th.psi_hard, 'd', 0.1, 100},
-        {"AEG_OOM_BASELINE_K", &g_th.baseline_k, 'd', 1, 100},
-        {"AEG_OOM_AVAIL_SOFT_PCT", &g_th.avail_soft_pct, 'd', 0, 90},
-        {"AEG_OOM_AVAIL_HARD_PCT", &g_th.avail_hard_pct, 'd', 0, 90},
-        {"AEG_OOM_SUSTAIN_N", &g_th.sustain_n, 'i', 1, 120},
-        {"AEG_OOM_PROTECT_SMART", &g_th.protect_smart, 'i', 0, 1},
-        {"AEG_OOM_CGROUP_KILL", &g_cgroup_kill, 'i', 0, 1},
-        {"AEG_OOM_DRYRUN", &g_dryrun, 'i', 0, 1},
-        {"AEG_OOM_RATE_MS", &g_rate_ms, 'l', 100, 60000},
-        {"AEG_OOM_REFRESH_MS", &g_refresh_ms, 'i', 100, 60000},
-        {"AEG_OOM_IDLE_MS", &g_idle_ms, 'i', 100, 60000},
-        {"AEG_OOM_IDLE_SCAN_S", &g_idle_scan_s, 'i', 1, 3600},
-        {"AEG_OOM_BASELINE_ALPHA", &g_baseline_alpha, 'd', 0.0001, 1},
-        {"AEG_OOM_TERM_GRACE_MS", &g_term_grace_ms, 'l', 1000, 60000},
-        {"AEG_OOM_PSI_STALL_US", &g_psi_stall_us, 'l', 1, 10000000},
-        {"AEG_OOM_PSI_WINDOW_US", &g_psi_window_us, 'l', 500000, 10000000},
-        {"AEG_OOM_AVAIL_SOFT_MB", &g_th.avail_soft_kb, 'm', 1, 1048576},
-        {"AEG_OOM_AVAIL_HARD_MB", &g_th.avail_hard_kb, 'm', 1, 1048576},
-    };
-    for (size_t i = 0; i < sizeof map / sizeof map[0]; i++) {
-        if (strcmp(key, map[i].key)) continue;
-        if (!strcmp(key, "AEG_OOM_DRYRUN") && g_cli_dryrun) return;
+    for (size_t i = 0; i < N_SETTINGS; i++) {
+        const num_setting *e = &k_settings[i];
+        if (strcmp(key, e->key)) continue;
+        if (e->dst == &g_dryrun && g_cli_dryrun) return;
         double value;
-        if (!aeg_config_number(val, map[i].min, map[i].max, map[i].type != 'd', &value)) {
-            logline("aegis-oom: invalid numeric config value ignored");
+        if (!aeg_config_number(val, e->min, e->max, e->type != 'd', &value)) {
+            char b[160]; snprintf(b, sizeof b, "aegis-oom: invalid value of %s ignored", key);
+            logline(b);
             return;
         }
-        if (map[i].type == 'd') *(double *)map[i].dst = value;
-        else if (map[i].type == 'i') *(int *)map[i].dst = (int)value;
-        else *(long *)map[i].dst = (long)value * (map[i].type == 'm' ? 1024 : 1);
-        if (map[i].dst == &g_th.avail_soft_kb) g_th.avail_soft_pct = 0;
-        if (map[i].dst == &g_th.avail_hard_kb) g_th.avail_hard_pct = 0;
+        setting_set(e, value);
+        /* explicit megabytes replace the percentage */
+        if (e->dst == &g_th.avail_soft_kb) g_th.avail_soft_pct = 0;
+        if (e->dst == &g_th.avail_hard_kb) g_th.avail_hard_pct = 0;
         return;
     }
 }
@@ -653,36 +663,27 @@ static int watcher_active(void) {
     struct timespec now;
     if (clock_gettime(CLOCK_REALTIME, &now) != 0) return 0;
     long age = (long)(now.tv_sec - st.st_mtim.tv_sec);
-    return age >= 0 && age <= 3;
+    return age >= 0 && age <= WATCH_FRESH_S;
+}
+
+/* Environment values go through the same parser as config lines, so inline
+ * comments left by EnvironmentFile are stripped the same way. */
+static void env_setting(const char *key) {
+    const char *v = getenv(key);
+    if (!v) return;
+    char line[1200];
+    snprintf(line, sizeof line, "%s=%s", key, v);
+    apply_conf_line(line);
 }
 
 static void load_env(void) {
-    g_th.psi_soft       = env_d("AEG_OOM_PSI_SOFT", 20.0);
-    g_th.psi_hard       = env_d("AEG_OOM_PSI_HARD", 40.0);
-    g_th.avail_soft_kb  = env_l("AEG_OOM_AVAIL_SOFT_MB", 0) * 1024;
-    g_th.avail_hard_kb  = env_l("AEG_OOM_AVAIL_HARD_MB", 0) * 1024;
-    g_th.avail_soft_pct = env_d("AEG_OOM_AVAIL_SOFT_PCT", g_th.avail_soft_kb ? 0.0 : 4.0);
-    g_th.avail_hard_pct = env_d("AEG_OOM_AVAIL_HARD_PCT", g_th.avail_hard_kb ? 0.0 : 1.5);
-    g_th.baseline_k     = env_d("AEG_OOM_BASELINE_K", 2.0);
-    g_th.sustain_n      = (int)env_l("AEG_OOM_SUSTAIN_N", 3);
-    g_th.protect_smart  = (int)env_l("AEG_OOM_PROTECT_SMART", 1);
-    g_cgroup_kill       = (int)env_l("AEG_OOM_CGROUP_KILL", 0);
-    g_rate_ms           = env_l("AEG_OOM_RATE_MS", 2000);
-    g_term_grace_ms     = env_l("AEG_OOM_TERM_GRACE_MS", 8000);
-    g_dryrun            = (int)env_l("AEG_OOM_DRYRUN", 1);
-    g_refresh_ms        = (int)env_l("AEG_OOM_REFRESH_MS", 1500);
-    const char *wp      = getenv("AEG_OOM_WATCH"); if (wp && *wp) g_watch_path = wp;
-    g_idle_ms           = (int)env_l("AEG_OOM_IDLE_MS", 6000);
-    g_idle_scan_s       = (int)env_l("AEG_OOM_IDLE_SCAN_S", 60);
-    if (g_idle_ms < g_refresh_ms) g_idle_ms = g_refresh_ms;
-    g_psi_stall_us      = env_l("AEG_OOM_PSI_STALL_US", 150000);
-    g_psi_window_us     = env_l("AEG_OOM_PSI_WINDOW_US", 1000000);
-    g_baseline_alpha    = env_d("AEG_OOM_BASELINE_ALPHA", 0.02);
-    const char *st      = getenv("AEG_OOM_STATE"); if (st) g_state_path = st;
-    const char *cf      = getenv("AEG_OOM_CONF");  if (cf) g_conf_path = cf;
-    const char *pp      = getenv("AEG_OOM_PSI_PATH"); if (pp) g_psi_path = pp;
-    const char *env_prot = getenv("AEG_OOM_PROTECT");
-    if (env_prot) { char line[2048]; snprintf(line, sizeof line, "AEG_OOM_PROTECT=%s", env_prot); apply_conf_line(line); }
+    apply_defaults();
+    for (size_t i = 0; i < N_SETTINGS; i++) env_setting(k_settings[i].key);
+    env_setting("AEG_OOM_STATE");
+    env_setting("AEG_OOM_PROTECT");
+    const char *wp = getenv("AEG_OOM_WATCH"); if (wp && *wp) g_watch_path = wp;
+    const char *cf = getenv("AEG_OOM_CONF");  if (cf) g_conf_path = cf;
+    const char *pp = getenv("AEG_OOM_PSI_PATH"); if (pp) g_psi_path = pp;
 }
 
 /* Precedence: defaults, environment, config file, flags. The file is read
@@ -784,7 +785,7 @@ static void run_loop(int ep) {
 
         /* Distance to the threshold sets the pace: far away sleeps long, close polls often. */
         int near = (m.mem_avail_kb >= 0 && th.avail_soft_kb > 0 &&
-                    m.mem_avail_kb <= th.avail_soft_kb * 4) ||
+                    m.mem_avail_kb <= th.avail_soft_kb * NEAR_FACTOR) ||
                    m.psi_some_avg10 >= g_th.psi_soft / 2.0;
         int prev_wait = wait_ms;
         wait_ms = near ? g_refresh_ms : g_idle_ms;
@@ -811,11 +812,11 @@ static void run_loop(int ep) {
             act_kill(vi, &v, &m);
             g_sustain++;
         } else {
-            if (want_scan && (++cycle % 4) == 0) enrich_top(n);
+            if (want_scan && (++cycle % ENRICH_EVERY) == 0) enrich_top(n);
             g_sustain = 0;
         }
         write_state(n, &m, &v, (int)(now - last_scan));
-        if (now - last_learn >= 300) { learn_save(); last_learn = now; }
+        if (now - last_learn >= LEARN_SAVE_S) { learn_save(); last_learn = now; }
     }
 }
 

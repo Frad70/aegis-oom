@@ -28,7 +28,7 @@ static inline int aeg_guard_read(const char *path, char *buf, size_t size) {
 
 /* A protected application includes its descendants, regardless of comm. */
 static inline int aeg_pid_protected(int pid, const protect_list *pl) {
-    for (int depth = 0; depth < 64; depth++) {
+    for (int depth = 0; depth < 64; depth++) {   /* same bound as the scan in aegis-oom */
         if (pid <= 1) return depth == 0;
         char path[64], buf[8192];
         snprintf(path, sizeof path, "/proc/%d/status", pid);

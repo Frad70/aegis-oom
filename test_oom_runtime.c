@@ -53,14 +53,27 @@ static void invalid_intervals_are_safe(void) {
 }
 
 static void invalid_environment_cannot_arm(void) {
-    setenv("AEG_TEST_NUMBER", "0garbage", 1);
-    EXPECT(env_l("AEG_TEST_NUMBER", 1) == 1, "invalid environment suffix must not turn dry-run off");
-    EXPECT(env_d("AEG_TEST_NUMBER", 20) == 20, "floating environment suffix is rejected");
-    setenv("AEG_TEST_NUMBER", "0 # intentional inline comment", 1);
-    EXPECT(env_l("AEG_TEST_NUMBER", 1) == 0, "EnvironmentFile inline comments remain supported");
-    setenv("AEG_TEST_NUMBER", "1.5\t# comment", 1);
-    EXPECT(env_d("AEG_TEST_NUMBER", 20) == 1.5, "floating environment comments remain supported");
-    unsetenv("AEG_TEST_NUMBER");
+    setenv("AEG_OOM_DRYRUN", "0garbage", 1);
+    setenv("AEG_OOM_PSI_SOFT", "7x", 1);
+    load_env();
+    EXPECT(g_dryrun == 1, "invalid environment suffix must not turn dry-run off");
+    EXPECT(g_th.psi_soft == 20, "floating environment suffix is rejected");
+    setenv("AEG_OOM_DRYRUN", "0 # intentional inline comment", 1);
+    setenv("AEG_OOM_PSI_SOFT", "1.5\t# comment", 1);
+    load_env();
+    EXPECT(g_dryrun == 0, "EnvironmentFile inline comments remain supported");
+    EXPECT(g_th.psi_soft == 1.5, "floating environment comments remain supported");
+    setenv("AEG_OOM_DRYRUN", "2", 1);
+    load_env();
+    EXPECT(g_dryrun == 1, "out of range dry run keeps the default");
+    unsetenv("AEG_OOM_DRYRUN"); unsetenv("AEG_OOM_PSI_SOFT");
+    setenv("AEG_OOM_AVAIL_SOFT_MB", "900", 1);
+    load_env();
+    EXPECT(g_th.avail_soft_kb == 900 * 1024 && g_th.avail_soft_pct == 0 && g_th.avail_hard_pct == 1.5,
+           "explicit megabytes replace only their own percentage");
+    unsetenv("AEG_OOM_AVAIL_SOFT_MB");
+    load_env();
+    EXPECT(g_th.avail_soft_kb == 0 && g_th.avail_soft_pct == 4, "defaults come back without the variable");
 }
 
 static void complete_candidate_selection(void) {

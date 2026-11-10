@@ -32,11 +32,13 @@
 #define USER_SLICE "/sys/fs/cgroup/user.slice"
 #define PATHMAX    1024
 #define DBUF       (64*1024)
+#define SCAN_DEPTH_MAX 32
+#define IDLE_POLL_NS   (250L*1000L*1000L)   /* below the threshold */
+#define HOT_POLL_NS    (50L*1000L*1000L)    /* above the threshold, until it drains */
 
 static const char *user_slice = USER_SLICE;
 static long  threshold   = 10000;             /* tasks in the watched cgroup that trigger a scan */
 static long  leaf_min    = 300;               /* never kill a leaf smaller than this */
-static long  interval_ns = 250L*1000L*1000L;  /* 250 ms while idle */
 static const char *target_file = "/run/aegis/reaper_target";
 
 /* static buffers: no allocations at runtime */
@@ -81,7 +83,7 @@ static long read_long_at(const char *dir, const char *name) {
 /* recursive walk: find the leaf cgroup with the highest pids.current.
  * path is one shared mutable buffer of length plen; restored after recursion. */
 static void scan(char *path, size_t plen, int depth) {
-    if (depth > 32) return;
+    if (depth > SCAN_DEPTH_MAX) return;
     char dbuf[DBUF];                 /* per recursion level, so a child walk does not clobber the
                                         parent's; on the stack because the cgroup tree is shallow */
     int fd = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
@@ -196,9 +198,9 @@ int main(int argc, char **argv) {
             } else {
                 logkv("reaper: threshold exceeded, no single leaf to kill in", user_slice, total);
             }
-            ts.tv_sec = 0; ts.tv_nsec = 50L * 1000L * 1000L; /* hot: poll more often */
+            ts.tv_sec = 0; ts.tv_nsec = HOT_POLL_NS;
         } else {
-            ts.tv_sec = 0; ts.tv_nsec = interval_ns;
+            ts.tv_sec = 0; ts.tv_nsec = IDLE_POLL_NS;
         }
         nanosleep(&ts, 0);
     }
